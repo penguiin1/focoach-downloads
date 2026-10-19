@@ -24,10 +24,10 @@ jobs:
           gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern windows-design-review-patch.zip --dir inputs
           if ($LASTEXITCODE -ne 0) { throw 'Unpublished patch download failed.' }
           $patchHash = (Get-FileHash inputs/windows-design-review-patch.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($patchHash -ne '85fdf666830c03473f2c34d6e13022b5138d6a07ef65480af55f00ebe43e5fa1') { throw 'Patch digest mismatch.' }
+          if ($patchHash -ne '7826000d837e6fd47b023d9493bce7d2a3a669f4d889b7f1b4210d1e9924b099') { throw 'Patch digest mismatch.' }
           Expand-Archive inputs/windows-design-review-patch.zip app -Force
-          if ((Get-FileHash app/focoach.dll -Algorithm SHA256).Hash.ToLowerInvariant() -ne '86d86d387ab92cf820829da45391913cf3eb290b0870c2961065348cff6274cc') { throw 'Final assembly digest mismatch.' }
-          [ordered]@{ packageSHA256=$hash; patchSHA256=$patchHash; sourceCommit='986711797b88449773da0438120a41172ada9fd7'; nativeWindows=$true } | ConvertTo-Json | Set-Content evidence/input.json
+          if ((Get-FileHash app/focoach.dll -Algorithm SHA256).Hash.ToLowerInvariant() -ne '056e63ee67074c3b7b781eb7cac83af4093a567e076d9ba3d7a1dfbc233c94bc') { throw 'Final assembly digest mismatch.' }
+          [ordered]@{ packageSHA256=$hash; patchSHA256=$patchHash; sourceCommit='398c9104bf9fed13a6eb4cea65380f199ebad3ca'; nativeWindows=$true } | ConvertTo-Json | Set-Content evidence/input.json
       - name: Execute the actual WPF application with isolated synthetic profiles
         shell: pwsh
         run: |
