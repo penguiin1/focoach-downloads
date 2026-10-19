@@ -23,18 +23,18 @@ jobs:
           if ((Get-FileHash inputs/Focoach.Desktop-win-x64-Portable.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '805f557dcfad3c41503feb38fa4e9aa4f01c8a83ec51a52b78ce9947be780be8') { throw 'Published runtime digest mismatch.' }
           gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern profile-menu-patch.zip --dir inputs
           if ($LASTEXITCODE -ne 0) { throw 'Reviewed private patch download failed.' }
-          if ((Get-FileHash inputs/profile-menu-patch.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '350747aff0067a5b2b5e35c58024c47fa7332d0304f1bed31787e3789cb8b87f') { throw 'Reviewed patch digest mismatch.' }
+          if ((Get-FileHash inputs/profile-menu-patch.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3cc71d8a2e832982b927ec988133a9e203db1891d5f349dc99e9e3f4403bcc85') { throw 'Reviewed patch digest mismatch.' }
           Expand-Archive inputs/Focoach.Desktop-win-x64-Portable.zip app
           Expand-Archive inputs/profile-menu-patch.zip app -Force
           $manifest = Get-Content app/profile-menu-manifest.json -Raw | ConvertFrom-Json
-          if ($manifest.sourceInputsSha256 -ne 'e7fa19377fbfee5d79aa673b7f2681da0b91dbf0247c06783bb19a09759200aa' -or $manifest.baselineCommit -ne 'f0a2c3b5175c5849cb878897dd0b2d4550993bc2' -or !$manifest.sourceTreeDirty -or $null -ne $manifest.sourceCommit) { throw 'Source provenance mismatch.' }
+          if ($manifest.sourceInputsSha256 -ne 'c4244470a7ad40b3524c481dbc4aebeabf5635066711ab249d2f7e0bf1eb99eb' -or $manifest.baselineCommit -ne 'f0a2c3b5175c5849cb878897dd0b2d4550993bc2' -or !$manifest.sourceTreeDirty -or $null -ne $manifest.sourceCommit) { throw 'Source provenance mismatch.' }
           $current = [IO.Path]::GetFullPath('app/current')
           foreach ($item in $manifest.payloadFiles) {
             $file = [IO.Path]::GetFullPath((Join-Path $current $item.path))
             if (!$file.StartsWith($current + [IO.Path]::DirectorySeparatorChar) -or !(Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item $file).Length -ne $item.sizeBytes -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $item.sha256) { throw 'Reconstructed application payload mismatch.' }
           }
-          if ((Get-FileHash app/current/focoach.dll -Algorithm SHA256).Hash.ToLowerInvariant() -ne '49c4f7be2e3765bcc497f7308d9fb52e5253b8a9f93ddb7934d9ea3ac556a62b') { throw 'Final assembly digest mismatch.' }
-          [ordered]@{ baselinePortableSha256='805f557dcfad3c41503feb38fa4e9aa4f01c8a83ec51a52b78ce9947be780be8'; patchSha256='350747aff0067a5b2b5e35c58024c47fa7332d0304f1bed31787e3789cb8b87f'; assemblySha256='49c4f7be2e3765bcc497f7308d9fb52e5253b8a9f93ddb7934d9ea3ac556a62b'; sourceInputsSha256='e7fa19377fbfee5d79aa673b7f2681da0b91dbf0247c06783bb19a09759200aa'; sourceCommit=$null; sourceTreeDirty=$true; baselineCommit='f0a2c3b5175c5849cb878897dd0b2d4550993bc2'; reviewedPayloadFiles=$manifest.payloadFiles.Count } | ConvertTo-Json | Set-Content evidence/input.json
+          if ((Get-FileHash app/current/focoach.dll -Algorithm SHA256).Hash.ToLowerInvariant() -ne '6dbf8d3f032eb094e8f0ae43343cc034ee113aa02c096ca9ee0f44a79feac12f') { throw 'Final assembly digest mismatch.' }
+          [ordered]@{ baselinePortableSha256='805f557dcfad3c41503feb38fa4e9aa4f01c8a83ec51a52b78ce9947be780be8'; patchSha256='3cc71d8a2e832982b927ec988133a9e203db1891d5f349dc99e9e3f4403bcc85'; assemblySha256='6dbf8d3f032eb094e8f0ae43343cc034ee113aa02c096ca9ee0f44a79feac12f'; sourceInputsSha256='c4244470a7ad40b3524c481dbc4aebeabf5635066711ab249d2f7e0bf1eb99eb'; sourceCommit=$null; sourceTreeDirty=$true; baselineCommit='f0a2c3b5175c5849cb878897dd0b2d4550993bc2'; reviewedPayloadFiles=$manifest.payloadFiles.Count } | ConvertTo-Json | Set-Content evidence/input.json
       - name: Execute real profile-menu and account UI with isolated synthetic profiles
         shell: pwsh
         run: |
@@ -71,7 +71,7 @@ jobs:
           foreach ($name in @('profile-menu-ko.png','profile-menu-en.png','profile-menu-long-name.png')) {
             if (!(Test-Path -LiteralPath (Join-Path evidence/screenshots $name))) { throw 'Profile menu native screenshot missing.' }
           }
-          [ordered]@{ status='PASS'; screenshotCount=@(Get-ChildItem evidence/screenshots -Filter '*.png').Count; assemblySha256='49c4f7be2e3765bcc497f7308d9fb52e5253b8a9f93ddb7934d9ea3ac556a62b' } | ConvertTo-Json | Set-Content evidence/result.json
+          [ordered]@{ status='PASS'; screenshotCount=@(Get-ChildItem evidence/screenshots -Filter '*.png').Count; assemblySha256='6dbf8d3f032eb094e8f0ae43343cc034ee113aa02c096ca9ee0f44a79feac12f' } | ConvertTo-Json | Set-Content evidence/result.json
       - name: Keep UI evidence only in the unpublished QA draft
         if: always()
         shell: pwsh
@@ -79,7 +79,7 @@ jobs:
           $release = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or !$release.isDraft) { throw 'Evidence destination must remain unpublished.' }
           New-Item -ItemType Directory -Force evidence | Out-Null
-          [ordered]@{ runId=$env:GITHUB_RUN_ID; attempt=$env:GITHUB_RUN_ATTEMPT; sourceInputsSha256='e7fa19377fbfee5d79aa673b7f2681da0b91dbf0247c06783bb19a09759200aa' } | ConvertTo-Json | Set-Content evidence/run.json
+          [ordered]@{ runId=$env:GITHUB_RUN_ID; attempt=$env:GITHUB_RUN_ATTEMPT; sourceInputsSha256='c4244470a7ad40b3524c481dbc4aebeabf5635066711ab249d2f7e0bf1eb99eb' } | ConvertTo-Json | Set-Content evidence/run.json
           $archive = "native-profile-menu-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip"
           Compress-Archive -Path evidence -DestinationPath $archive -CompressionLevel Optimal
           gh release upload $env:QA_TAG $archive --repo $env:GITHUB_REPOSITORY --clobber
