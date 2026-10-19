@@ -17,6 +17,9 @@ jobs:
       QA_TAG: qa-velopack-20261019
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Verify native Windows and CurrentUser DPAPI
         shell: pwsh
         run: |
@@ -30,8 +33,12 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force inputs, evidence | Out-Null
-          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --pattern Focoach.Desktop-0.4.9-win-x64-full.nupkg --pattern Test-VelopackInstaller.ps1 --dir inputs
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --pattern 'Focoach.Desktop-0.4.9-win-x64-*.nupkg' --pattern qa-next-releases.win-x64.json --pattern Test-VelopackInstaller.ps1 --dir inputs
           if ($LASTEXITCODE -ne 0) { throw 'Could not download draft inputs.' }
+          foreach ($required in @('Focoach.Desktop-win-x64-Setup.exe', 'Focoach.Desktop-0.4.9-win-x64-full.nupkg', 'qa-next-releases.win-x64.json', 'Test-VelopackInstaller.ps1')) {
+            if (!(Test-Path (Join-Path inputs $required))) { throw "Missing draft QA input: $required" }
+          }
+          Move-Item inputs/qa-next-releases.win-x64.json inputs/releases.win-x64.json
           Get-ChildItem inputs -File | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}}, Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
       - name: Install, reinstall, update, preserve profile and uninstall
         shell: pwsh
