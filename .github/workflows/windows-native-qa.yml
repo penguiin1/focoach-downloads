@@ -1,0 +1,220 @@
+name: Windows installer native QA
+on:
+  workflow_dispatch:
+    inputs:
+      qa_tag:
+        description: Draft release holding the reviewed test harness
+        required: true
+        default: qa-desktop-release-0.4.11-20261019
+      target_tag:
+        description: Release containing the candidate full package and feed
+        required: true
+        default: qa-desktop-release-0.4.11-20261019
+      production_feed:
+        description: Verify against the public GitHub update feed after publication
+        type: boolean
+        default: false
+permissions:
+  # GitHub hides draft releases from read-only installations. This reviewed
+  # workflow downloads draft inputs; it never publishes or changes a release.
+  contents: write
+concurrency:
+  group: windows-desktop-release-qa
+  cancel-in-progress: false
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      QA_TAG: ${{ inputs.qa_tag }}
+      TARGET_TAG: ${{ inputs.target_tag }}
+      PRODUCTION_FEED: ${{ inputs.production_feed }}
+      GH_TOKEN: ${{ github.token }}
+      FOCOACH_TEST_ACCOUNT_UI: '1'
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native Windows and CurrentUser DPAPI
+        shell: pwsh
+        run: |
+          if (!$IsWindows) { throw 'Native Windows is required.' }
+          $plain = [Text.Encoding]::UTF8.GetBytes('isolated-feedback-release-qa')
+          $encrypted = [Security.Cryptography.ProtectedData]::Protect($plain, $null, 'CurrentUser')
+          $restored = [Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, 'CurrentUser')
+          if ([Convert]::ToBase64String($plain) -ne [Convert]::ToBase64String($restored)) { throw 'DPAPI roundtrip failed.' }
+      - name: Download actual published 0.4.10 installer and reviewed 0.4.11 candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$destination.isDraft) { throw 'QA inputs and evidence must remain unpublished.' }
+          if ($env:QA_TAG -notmatch '^qa-[A-Za-z0-9.-]+$' -or $env:TARGET_TAG -notin @('qa-desktop-release-0.4.11-20261019','v0.4.11')) { throw 'Unexpected release inputs.' }
+          New-Item -ItemType Directory -Force inputs/base, inputs/update, inputs/tools, evidence | Out-Null
+          gh release download v0.4.10 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/base
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download published base installer.' }
+          $baseHash = (Get-FileHash inputs/base/Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($baseHash -ne '6320e2e5c3bdb35138637b985528c2bab7dc1c2656303850cea6ebe6d9f4c4d3') { throw 'Published 0.4.10 installer digest mismatch.' }
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Test-VelopackInstaller.ps1 --dir inputs/tools
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download reviewed harness.' }
+          $harnessHash = (Get-FileHash inputs/tools/Test-VelopackInstaller.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($harnessHash -ne 'e938c7519fb8ca0cffef39f93ff59d8e51ff564ac32084332b417fd45f0cbd9b') { throw 'Reviewed test harness digest mismatch.' }
+          gh release download $env:TARGET_TAG --repo $env:GITHUB_REPOSITORY --pattern '*.nupkg' --pattern 'releases.win-x64.json' --pattern 'installer-build.json' --dir inputs/update
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download candidate update artifacts.' }
+          $manifest = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
+          if ($manifest.appVersion -ne '0.4.11' -or $manifest.packId -ne 'Focoach.Desktop' -or $manifest.channel -ne 'win-x64') { throw 'Unexpected candidate identity.' }
+          if ($manifest.sourceCommit -ne 'b9e7b8b23046447ea43710e80d94fc63d13c7ca3' -or $manifest.sourceTreeDirty -or $manifest.sourceInputsSha256 -ne '8b1c58935a575baab3ebee478ee6bcc8a9abbe8dbbf538a9beb1f2de2dd151f3') { throw 'Candidate provenance mismatch.' }
+          $candidateHash = (Get-FileHash inputs/update/Focoach.Desktop-0.4.11-win-x64-full.nupkg -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -ne 'ca37bb553ade520ffdee2a158f936421927cdf613f1cc17091dcb18339c5a75a') { throw 'Reviewed 0.4.11 full package digest mismatch.' }
+          $feed = Get-Content inputs/update/releases.win-x64.json -Raw | ConvertFrom-Json
+          foreach ($asset in $feed.Assets) {
+            if ([IO.Path]::GetFileName($asset.FileName) -ne $asset.FileName) { throw 'Unsafe package filename.' }
+            $file = Join-Path inputs/update $asset.FileName
+            if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+              gh release download v0.4.10 --repo $env:GITHUB_REPOSITORY --pattern $asset.FileName --dir inputs/update
+              if ($LASTEXITCODE -ne 0) { throw 'Could not download retained published feed package.' }
+            }
+            if ((Get-Item $file).Length -ne $asset.Size -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.SHA256.ToLowerInvariant()) { throw 'Candidate package integrity mismatch.' }
+          }
+          New-Item -ItemType Directory -Force inputs/base-fixture, inputs/manual-update | Out-Null
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern 'Base-Focoach.Desktop-win-x64-Setup.exe' --pattern 'base-installer-build.json' --pattern 'base-fixture-provenance.json' --dir inputs/base-fixture
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the reviewed new-code older-version fixture.' }
+          $baseFixture = Get-Content inputs/base-fixture/base-installer-build.json -Raw | ConvertFrom-Json
+          $override = Get-Content inputs/base-fixture/base-fixture-provenance.json -Raw | ConvertFrom-Json
+          if ((Get-FileHash inputs/base-fixture/Base-Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2930a16ccf667aabde7e7a1beddc9d9512e2e59f43ea34760e34b5a7aa389fc7' -or
+              $baseFixture.appVersion -ne '0.4.10' -or $baseFixture.sourceCommit -ne 'b9e7b8b23046447ea43710e80d94fc63d13c7ca3' -or $baseFixture.sourceTreeDirty -or
+              $baseFixture.sourceInputsSha256 -ne '8b1c58935a575baab3ebee478ee6bcc8a9abbe8dbbf538a9beb1f2de2dd151f3' -or $override.purpose -ne 'QA-only Version override' -or $override.productVersion -ne '0.4.11') { throw 'Older-version fixture provenance mismatch.' }
+          # This fixture differs from the actual published 0.4.10 base. Use the
+          # exact candidate full bytes, with no delta generated for another base.
+          Copy-Item inputs/update/Focoach.Desktop-0.4.11-win-x64-full.nupkg inputs/manual-update/
+          $fullOnly = @($feed.Assets | Where-Object { $_.Version -eq '0.4.11' -and $_.Type -eq 'Full' })
+          if ($fullOnly.Count -ne 1 -or $fullOnly[0].SHA256.ToLowerInvariant() -ne 'ca37bb553ade520ffdee2a158f936421927cdf613f1cc17091dcb18339c5a75a') { throw 'Manual fixture must use the actual final candidate full package.' }
+          @{ Assets = @($fullOnly) } | ConvertTo-Json -Depth 10 | Set-Content inputs/manual-update/releases.win-x64.json
+          Get-ChildItem inputs -File -Recurse | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}}, Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
+      - name: Verify actual 0.4.10 to 0.4.11 update and saved login and records
+        shell: pwsh
+        run: |
+          $arguments = @{
+            InstallerPath = 'inputs/base/Focoach.Desktop-win-x64-Setup.exe'
+            ExpectedVersion = '0.4.10'
+            UpdatePackagePath = 'inputs/update/Focoach.Desktop-0.4.11-win-x64-full.nupkg'
+            UpdatedVersion = '0.4.11'
+            ArtifactsDirectory = 'evidence'
+            RequireProductionConfiguration = $true
+            UseProductionUpdateFeed = ($env:PRODUCTION_FEED -eq 'true')
+          }
+          ./inputs/tools/Test-VelopackInstaller.ps1 @arguments
+          # Verify the actual reviewed candidate UI after the real updater restart.
+          foreach ($language in @('ko', 'en')) {
+            $screenshot = "evidence/updated-wpf-screenshots/feedback-$language.png"
+            if (!(Test-Path -LiteralPath $screenshot -PathType Leaf) -or (Get-Item $screenshot).Length -le 0) { throw "Updated feedback screenshot missing: $language" }
+          }
+          foreach ($name in @('profile-menu-ko.png','profile-menu-en.png','profile-menu-long-name.png','shell-native-titlebar.png','shell-native-titlebar-maximized.png')) {
+            if (!(Test-Path -LiteralPath (Join-Path 'evidence/updated-wpf-screenshots' $name))) { throw "Updated compact native titlebar screenshot missing: $name" }
+          }
+          $updatedSmoke = Get-Content evidence/updated-windows-smoke.txt -Raw
+          if (!$updatedSmoke.StartsWith('PASS:')) { throw 'Updated 0.4.11 WPF smoke did not pass.' }
+          [ordered]@{ status = 'PASS'; version = '0.4.11'; feedbackLocales = @('ko','en');
+            feedbackUpdateDeferralSmokePassed = $true; guestNetworkBlockedInSmoke = $true;
+            actualPublishedBaseVersion = '0.4.10'; baseInstallerSha256 = '6320e2e5c3bdb35138637b985528c2bab7dc1c2656303850cea6ebe6d9f4c4d3';
+            targetFullSha256 = 'ca37bb553ade520ffdee2a158f936421927cdf613f1cc17091dcb18339c5a75a'
+          } | ConvertTo-Json | Set-Content evidence/feedback-native-checks.json
+      - name: Verify new update code waits for an explicit user restart into the actual candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./inputs/tools/Test-VelopackInstaller.ps1 -InstallerPath inputs/base-fixture/Base-Focoach.Desktop-win-x64-Setup.exe -ExpectedVersion '0.4.10' -UpdatePackagePath inputs/manual-update/Focoach.Desktop-0.4.11-win-x64-full.nupkg -UpdatedVersion '0.4.11' -ArtifactsDirectory evidence/manual-fixture -RequireProductionConfiguration -RequireUserRequestedRestart
+          $result = Get-Content evidence/manual-fixture/app-automatic-update-preservation.json -Raw | ConvertFrom-Json
+          if ($result.status -ne 'PASS' -or !$result.waitedForUserRestart -or !$result.userRequestedRestart -or !$result.normalQuitDidNotApply) { throw 'The new engine did not preserve explicit user restart semantics.' }
+          foreach ($language in @('ko','en')) {
+            if (!(Test-Path -LiteralPath "evidence/manual-fixture/update-choice-screenshots/update-ready-header-$language.png")) { throw 'Prepared restart UI screenshot missing.' }
+          }
+      - name: Verify new 0.4.11 Setup fresh install, feedback and removal
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force inputs/setup, evidence/fresh-setup | Out-Null
+          gh release download $env:TARGET_TAG --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/setup
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the new 0.4.11 Setup executable.' }
+          $setup = (Resolve-Path inputs/setup/Focoach.Desktop-win-x64-Setup.exe).Path
+          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($setupHash -ne '2b6acd6e4f37901828f33bdf9fbfcf2c0eef171ddb62d0038f2b5ab3e42c4c60') { throw 'Reviewed 0.4.11 Setup digest mismatch.' }
+          $freshEvidence = [IO.Path]::GetFullPath('evidence/fresh-setup')
+          $freshRoot = Join-Path ([IO.Path]::GetTempPath()) ('focoach-feedback-setup-' + [Guid]::NewGuid().ToString('N'))
+          $install = Join-Path $freshRoot '한글 사용자\새 Focoach App'
+          $current = Join-Path $install 'current'
+          $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Focoach.Desktop'
+          if (Test-Path $registration) { throw 'The preceding upgrade harness did not remove its installation.' }
+          New-Item -ItemType Directory -Force $freshRoot | Out-Null
+          $originalReviewDirectory = $env:FOCOACH_REVIEW_DIRECTORY
+          $freshRemoved = $false
+          function Invoke-FreshProcess([string]$File, [string[]]$ProcessArguments, [string]$Stage, [int]$Timeout = 180) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $File; $info.UseShellExecute = $false
+            $info.WorkingDirectory = Split-Path $File -Parent
+            foreach ($argument in $ProcessArguments) { $info.ArgumentList.Add($argument) }
+            $process = [Diagnostics.Process]::Start($info)
+            if ($null -eq $process) { throw "Could not start $Stage." }
+            try {
+              if (!$process.WaitForExit($Timeout * 1000)) { $process.Kill($true); $process.WaitForExit(); throw "$Stage timed out." }
+              [ordered]@{ stage = $Stage; exitCode = $process.ExitCode } | ConvertTo-Json | Set-Content (Join-Path $freshEvidence ($Stage + '.json'))
+              if ($process.ExitCode -ne 0) { throw "$Stage failed with exit code $($process.ExitCode)." }
+            } finally {
+              if (!$process.HasExited) { $process.Kill($true); $process.WaitForExit() }
+              $process.Dispose()
+            }
+          }
+          try {
+            Invoke-FreshProcess $setup @('--silent','--installto',$install,'--log',(Join-Path $freshEvidence 'install.log')) 'install' 300
+            $version = ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $current 'focoach.dll')).ProductVersion -split '\+')[0]
+            if ($version -ne '0.4.11') { throw 'Fresh installed application has the wrong version.' }
+            $entry = Get-ItemProperty $registration
+            if ($entry.DisplayVersion -ne '0.4.11' -or [IO.Path]::GetFullPath($entry.InstallLocation).TrimEnd('\') -ine $install.TrimEnd('\')) { throw 'Fresh installation registration mismatch.' }
+            foreach ($kind in @('wpf','account')) {
+              $smokeProfile = Join-Path $freshRoot ('새 검사 기록-' + $kind)
+              $env:FOCOACH_REVIEW_DIRECTORY = Join-Path $freshEvidence ($kind + '-screenshots')
+              $arguments = @('--data-directory',$smokeProfile,'--smoke-test')
+              $resultName = 'windows-smoke.txt'
+              if ($kind -eq 'account') { $arguments += '--account-smoke-test'; $resultName = 'account-smoke.txt' }
+              Invoke-FreshProcess (Join-Path $current 'focoach.exe') $arguments $kind 180
+              $result = Get-Content (Join-Path $smokeProfile $resultName) -Raw
+              $result | Set-Content (Join-Path $freshEvidence ($kind + '-smoke.txt'))
+              Get-ChildItem $smokeProfile -File -Recurse -Filter '*smoke*.txt' | ForEach-Object { Copy-Item $_.FullName (Join-Path $freshEvidence ($kind + '-' + $_.Name)) -Force }
+              if (!$result.StartsWith('PASS:')) { throw "Fresh $kind smoke failed." }
+            }
+            foreach ($name in @('profile-menu-ko.png','profile-menu-en.png','profile-menu-long-name.png','shell-native-titlebar.png')) {
+              if (!(Test-Path -LiteralPath (Join-Path $freshEvidence ('wpf-screenshots/' + $name)))) { throw 'Fresh profile or compact titlebar screenshot missing.' }
+            }
+            foreach ($language in @('ko','en')) {
+              $screenshot = Join-Path $freshEvidence "wpf-screenshots/feedback-$language.png"
+              if (!(Test-Path $screenshot -PathType Leaf) -or (Get-Item $screenshot).Length -le 0) { throw "Fresh feedback screenshot missing: $language" }
+            }
+            Invoke-FreshProcess (Join-Path $install 'Update.exe') @('--silent','--log',(Join-Path $freshEvidence 'uninstall.log'),'uninstall') 'uninstall' 180
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ((Test-Path (Join-Path $current 'focoach.exe')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+            if ((Test-Path (Join-Path $current 'focoach.exe')) -or (Test-Path $registration)) { throw 'Fresh installation was not fully removed.' }
+            $freshRemoved = $true
+            [ordered]@{ status = 'PASS'; version = $version; setupSha256 = $setupHash; wpfSmoke = 'PASS'; accountSmoke = 'PASS'; feedbackLocales = @('ko','en'); removed = $true } | ConvertTo-Json | Set-Content evidence/fresh-setup-checks.json
+          } catch {
+            [ordered]@{ status = 'FAIL'; error = $_.Exception.Message; position = $_.InvocationInfo.PositionMessage } | ConvertTo-Json | Set-Content evidence/fresh-setup-checks.json
+            throw
+          } finally {
+            $env:FOCOACH_REVIEW_DIRECTORY = $originalReviewDirectory
+            if (!$freshRemoved -and (Test-Path (Join-Path $install 'Update.exe'))) {
+              try { Invoke-FreshProcess (Join-Path $install 'Update.exe') @('--silent','uninstall') 'cleanup-uninstall' 180 }
+              catch { Write-Warning "Fresh installation cleanup failed: $($_.Exception.Message)" }
+            }
+          }
+      - name: Preserve native evidence only in the unpublished QA draft
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$release.isDraft) { throw 'QA evidence destination must remain an unpublished draft.' }
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          [ordered]@{ runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; sourceCommit = 'b9e7b8b23046447ea43710e80d94fc63d13c7ca3'; candidateVersion = '0.4.11'; targetTag = $env:TARGET_TAG; productionFeed = $env:PRODUCTION_FEED } | ConvertTo-Json | Set-Content evidence/run.json
+          $archive = "native-windows-release-0.4.11-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip"
+          Compress-Archive -Path evidence -DestinationPath $archive -CompressionLevel Optimal
+          gh release upload $env:QA_TAG --repo $env:GITHUB_REPOSITORY $archive --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not preserve private draft QA evidence.' }
