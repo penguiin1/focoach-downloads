@@ -1,20 +1,32 @@
 name: Windows installer native QA
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/velopack-native-qa]
-    paths: [.github/workflows/windows-native-qa.yml]
+    inputs:
+      qa_tag:
+        description: Draft release holding the reviewed test harness
+        required: true
+        default: qa-feedback-20261019
+      target_tag:
+        description: Release containing the candidate full package and feed
+        required: true
+        default: v0.4.9
+      production_feed:
+        description: Verify against the public GitHub update feed after publication
+        type: boolean
+        default: false
 permissions:
-  contents: write
+  contents: read
 concurrency:
-  group: windows-native-qa
+  group: windows-feedback-release-qa
   cancel-in-progress: false
 jobs:
   installer:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
-      QA_TAG: qa-velopack-20261019
+      QA_TAG: ${{ inputs.qa_tag }}
+      TARGET_TAG: ${{ inputs.target_tag }}
+      PRODUCTION_FEED: ${{ inputs.production_feed }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/setup-python@v5
@@ -24,30 +36,48 @@ jobs:
         shell: pwsh
         run: |
           if (!$IsWindows) { throw 'Native Windows is required.' }
-          $plain = [Text.Encoding]::UTF8.GetBytes('isolated-native-Windows-probe')
+          $plain = [Text.Encoding]::UTF8.GetBytes('isolated-feedback-release-qa')
           $encrypted = [Security.Cryptography.ProtectedData]::Protect($plain, $null, 'CurrentUser')
           $restored = [Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, 'CurrentUser')
           if ([Convert]::ToBase64String($plain) -ne [Convert]::ToBase64String($restored)) { throw 'DPAPI roundtrip failed.' }
-          Write-Host "Native Windows: $([Environment]::OSVersion); interactive: $([Environment]::UserInteractive); DPAPI: passed"
-      - name: Download isolated base fixture and the published release
+      - name: Download actual published 0.4.8 installer and reviewed 0.4.9 candidate
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force inputs, evidence | Out-Null
-          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern qa-base-0.4.7-Setup.exe --pattern Test-VelopackInstaller.ps1 --dir inputs
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download draft inputs.' }
-          gh release download v0.4.8 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-0.4.8-win-x64-full.nupkg --dir inputs
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download the published release.' }
-          foreach ($required in @('qa-base-0.4.7-Setup.exe', 'Focoach.Desktop-0.4.8-win-x64-full.nupkg', 'Test-VelopackInstaller.ps1')) {
-            if (!(Test-Path (Join-Path inputs $required))) { throw "Missing draft QA input: $required" }
+          if ($env:QA_TAG -notmatch '^qa-[A-Za-z0-9-]+$' -or $env:TARGET_TAG -ne 'v0.4.9') { throw 'Unexpected release inputs.' }
+          New-Item -ItemType Directory -Force inputs/base, inputs/update, inputs/tools, evidence | Out-Null
+          gh release download v0.4.8 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/base
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download published base installer.' }
+          $baseHash = (Get-FileHash inputs/base/Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($baseHash -ne 'ce99ebc69a75acce886f7c85223afa7f4f4596b981fe2897dbacbfb15182e117') { throw 'Published 0.4.8 installer digest mismatch.' }
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Test-VelopackInstaller.ps1 --dir inputs/tools
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download reviewed harness.' }
+          gh release download $env:TARGET_TAG --repo $env:GITHUB_REPOSITORY --pattern '*.nupkg' --pattern 'releases.win-x64.json' --pattern 'installer-build.json' --dir inputs/update
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download candidate update artifacts.' }
+          $manifest = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
+          if ($manifest.appVersion -ne '0.4.9' -or $manifest.packId -ne 'Focoach.Desktop' -or $manifest.channel -ne 'win-x64') { throw 'Unexpected candidate identity.' }
+          $feed = Get-Content inputs/update/releases.win-x64.json -Raw | ConvertFrom-Json
+          foreach ($asset in $feed.Assets) {
+            if ([IO.Path]::GetFileName($asset.FileName) -ne $asset.FileName) { throw 'Unsafe package filename.' }
+            $file = Join-Path inputs/update $asset.FileName
+            if ((Get-Item $file).Length -ne $asset.Size -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.SHA256.ToLowerInvariant()) { throw 'Candidate package integrity mismatch.' }
           }
-          Get-ChildItem inputs -File | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}}, Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
-      - name: Verify production GitHub update, saved login and records
+          Get-ChildItem inputs -File -Recurse | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}}, Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
+      - name: Verify actual 0.4.8 to 0.4.9 update and saved login and records
         shell: pwsh
         run: |
-          ./inputs/Test-VelopackInstaller.ps1 -InstallerPath inputs/qa-base-0.4.7-Setup.exe -ExpectedVersion 0.4.7 -UpdatePackagePath inputs/Focoach.Desktop-0.4.8-win-x64-full.nupkg -UpdatedVersion 0.4.8 -ArtifactsDirectory evidence -RequireProductionConfiguration -UseProductionUpdateFeed
+          $arguments = @{
+            InstallerPath = 'inputs/base/Focoach.Desktop-win-x64-Setup.exe'
+            ExpectedVersion = '0.4.8'
+            UpdatePackagePath = 'inputs/update/Focoach.Desktop-0.4.9-win-x64-full.nupkg'
+            UpdatedVersion = '0.4.9'
+            ArtifactsDirectory = 'evidence'
+            RequireProductionConfiguration = $true
+            UseProductionUpdateFeed = ($env:PRODUCTION_FEED -eq 'true')
+          }
+          ./inputs/tools/Test-VelopackInstaller.ps1 @arguments
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-windows-qa
-          retention-days: 7
+          name: native-windows-feedback-qa
+          retention-days: 3
           path: evidence/
