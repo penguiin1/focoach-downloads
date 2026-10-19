@@ -59,9 +59,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not download candidate update artifacts.' }
           $manifest = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
           if ($manifest.appVersion -ne '0.4.9' -or $manifest.packId -ne 'Focoach.Desktop' -or $manifest.channel -ne 'win-x64') { throw 'Unexpected candidate identity.' }
-          if ($null -ne $manifest.sourceCommit -or !$manifest.sourceTreeDirty -or $manifest.sourceInputsSha256 -ne '9cbcdd3e5680a096c5b25152b7aff9a16ac1f76204b845582741fc7bd15e2c18') { throw 'Candidate provenance mismatch.' }
+          if ($null -ne $manifest.sourceCommit -or !$manifest.sourceTreeDirty -or $manifest.sourceInputsSha256 -ne '290cef70a3b38721586538c17c52bcf9ef046e2dda46d689697b07fc90a7909f') { throw 'Candidate provenance mismatch.' }
           $candidateHash = (Get-FileHash inputs/update/Focoach.Desktop-0.4.9-win-x64-full.nupkg -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($candidateHash -ne '65969d8693a7aeaf28c5de52f653c9a31c681a59ed8fe3fd972f1782180a4ad5') { throw 'Reviewed 0.4.9 full package digest mismatch.' }
+          if ($candidateHash -ne '03438788f00c2de02efbfc4b7a69802e67b65d5d8aeef183d7dc756de9ecd05f') { throw 'Reviewed 0.4.9 full package digest mismatch.' }
           $feed = Get-Content inputs/update/releases.win-x64.json -Raw | ConvertFrom-Json
           foreach ($asset in $feed.Assets) {
             if ([IO.Path]::GetFileName($asset.FileName) -ne $asset.FileName) { throw 'Unsafe package filename.' }
@@ -93,8 +93,80 @@ jobs:
           [ordered]@{ status = 'PASS'; version = '0.4.9'; feedbackLocales = @('ko','en');
             feedbackUpdateDeferralSmokePassed = $true; guestNetworkBlockedInSmoke = $true;
             actualPublishedBaseVersion = '0.4.8'; baseInstallerSha256 = 'ce99ebc69a75acce886f7c85223afa7f4f4596b981fe2897dbacbfb15182e117';
-            targetFullSha256 = '65969d8693a7aeaf28c5de52f653c9a31c681a59ed8fe3fd972f1782180a4ad5'
+            targetFullSha256 = '03438788f00c2de02efbfc4b7a69802e67b65d5d8aeef183d7dc756de9ecd05f'
           } | ConvertTo-Json | Set-Content evidence/feedback-native-checks.json
+      - name: Verify new 0.4.9 Setup fresh install, feedback and removal
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force inputs/setup, evidence/fresh-setup | Out-Null
+          gh release download $env:TARGET_TAG --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/setup
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the new 0.4.9 Setup executable.' }
+          $setup = (Resolve-Path inputs/setup/Focoach.Desktop-win-x64-Setup.exe).Path
+          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($setupHash -ne 'dc7c39a13badcebbd8d39d758e8b0f6c7076e49631dd17e045e69f19123b4866') { throw 'Reviewed 0.4.9 Setup digest mismatch.' }
+          $freshEvidence = [IO.Path]::GetFullPath('evidence/fresh-setup')
+          $freshRoot = Join-Path ([IO.Path]::GetTempPath()) ('focoach-feedback-setup-' + [Guid]::NewGuid().ToString('N'))
+          $install = Join-Path $freshRoot '한글 사용자\새 Focoach App'
+          $current = Join-Path $install 'current'
+          $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Focoach.Desktop'
+          if (Test-Path $registration) { throw 'The preceding upgrade harness did not remove its installation.' }
+          New-Item -ItemType Directory -Force $freshRoot | Out-Null
+          $originalReviewDirectory = $env:FOCOACH_REVIEW_DIRECTORY
+          $freshRemoved = $false
+          function Invoke-FreshProcess([string]$File, [string[]]$ProcessArguments, [string]$Stage, [int]$Timeout = 180) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $File; $info.UseShellExecute = $false
+            $info.WorkingDirectory = Split-Path $File -Parent
+            foreach ($argument in $ProcessArguments) { $info.ArgumentList.Add($argument) }
+            $process = [Diagnostics.Process]::Start($info)
+            if ($null -eq $process) { throw "Could not start $Stage." }
+            try {
+              if (!$process.WaitForExit($Timeout * 1000)) { $process.Kill($true); $process.WaitForExit(); throw "$Stage timed out." }
+              [ordered]@{ stage = $Stage; exitCode = $process.ExitCode } | ConvertTo-Json | Set-Content (Join-Path $freshEvidence ($Stage + '.json'))
+              if ($process.ExitCode -ne 0) { throw "$Stage failed with exit code $($process.ExitCode)." }
+            } finally {
+              if (!$process.HasExited) { $process.Kill($true); $process.WaitForExit() }
+              $process.Dispose()
+            }
+          }
+          try {
+            Invoke-FreshProcess $setup @('--silent','--installto',$install,'--log',(Join-Path $freshEvidence 'install.log')) 'install' 300
+            $version = ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $current 'focoach.dll')).ProductVersion -split '\+')[0]
+            if ($version -ne '0.4.9') { throw 'Fresh installed application has the wrong version.' }
+            $entry = Get-ItemProperty $registration
+            if ($entry.DisplayVersion -ne '0.4.9' -or [IO.Path]::GetFullPath($entry.InstallLocation).TrimEnd('\') -ine $install.TrimEnd('\')) { throw 'Fresh installation registration mismatch.' }
+            foreach ($kind in @('wpf','account')) {
+              $smokeProfile = Join-Path $freshRoot ('새 검사 기록-' + $kind)
+              $env:FOCOACH_REVIEW_DIRECTORY = Join-Path $freshEvidence ($kind + '-screenshots')
+              $arguments = @('--data-directory',$smokeProfile,'--smoke-test')
+              $resultName = 'windows-smoke.txt'
+              if ($kind -eq 'account') { $arguments += '--account-smoke-test'; $resultName = 'account-smoke.txt' }
+              Invoke-FreshProcess (Join-Path $current 'focoach.exe') $arguments $kind 180
+              $result = Get-Content (Join-Path $smokeProfile $resultName) -Raw
+              $result | Set-Content (Join-Path $freshEvidence ($kind + '-smoke.txt'))
+              if (!$result.StartsWith('PASS:')) { throw "Fresh $kind smoke failed." }
+            }
+            foreach ($language in @('ko','en')) {
+              $screenshot = Join-Path $freshEvidence "wpf-screenshots/feedback-$language.png"
+              if (!(Test-Path $screenshot -PathType Leaf) -or (Get-Item $screenshot).Length -le 0) { throw "Fresh feedback screenshot missing: $language" }
+            }
+            Invoke-FreshProcess (Join-Path $install 'Update.exe') @('--silent','--log',(Join-Path $freshEvidence 'uninstall.log'),'uninstall') 'uninstall' 180
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ((Test-Path (Join-Path $current 'focoach.exe')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+            if ((Test-Path (Join-Path $current 'focoach.exe')) -or (Test-Path $registration)) { throw 'Fresh installation was not fully removed.' }
+            $freshRemoved = $true
+            [ordered]@{ status = 'PASS'; version = $version; setupSha256 = $setupHash; wpfSmoke = 'PASS'; accountSmoke = 'PASS'; feedbackLocales = @('ko','en'); removed = $true } | ConvertTo-Json | Set-Content evidence/fresh-setup-checks.json
+          } catch {
+            [ordered]@{ status = 'FAIL'; error = $_.Exception.Message; position = $_.InvocationInfo.PositionMessage } | ConvertTo-Json | Set-Content evidence/fresh-setup-checks.json
+            throw
+          } finally {
+            $env:FOCOACH_REVIEW_DIRECTORY = $originalReviewDirectory
+            if (!$freshRemoved -and (Test-Path (Join-Path $install 'Update.exe'))) {
+              try { Invoke-FreshProcess (Join-Path $install 'Update.exe') @('--silent','uninstall') 'cleanup-uninstall' 180 }
+              catch { Write-Warning "Fresh installation cleanup failed: $($_.Exception.Message)" }
+            }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
