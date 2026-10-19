@@ -1,175 +1,69 @@
-name: Windows installer native QA
+name: Windows design native review
 on:
   workflow_dispatch:
-    inputs:
-      qa_tag:
-        description: Draft release holding the reviewed test harness
-        required: true
-        default: qa-feedback-20261019
-      target_tag:
-        description: Release containing the candidate full package and feed
-        required: true
-        default: v0.4.9
-      production_feed:
-        description: Verify against the public GitHub update feed after publication
-        type: boolean
-        default: false
 permissions:
-  # GitHub hides draft releases from read-only installations. This reviewed
-  # workflow downloads draft inputs; it never publishes or changes a release.
   contents: write
-concurrency:
-  group: windows-feedback-release-qa
-  cancel-in-progress: false
 jobs:
-  installer:
+  review:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     env:
-      QA_TAG: ${{ inputs.qa_tag }}
-      TARGET_TAG: ${{ inputs.target_tag }}
-      PRODUCTION_FEED: ${{ inputs.production_feed }}
       GH_TOKEN: ${{ github.token }}
+      QA_TAG: qa-design-20261019-727da4
     steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Verify native Windows and CurrentUser DPAPI
-        shell: pwsh
-        run: |
-          if (!$IsWindows) { throw 'Native Windows is required.' }
-          $plain = [Text.Encoding]::UTF8.GetBytes('isolated-feedback-release-qa')
-          $encrypted = [Security.Cryptography.ProtectedData]::Protect($plain, $null, 'CurrentUser')
-          $restored = [Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, 'CurrentUser')
-          if ([Convert]::ToBase64String($plain) -ne [Convert]::ToBase64String($restored)) { throw 'DPAPI roundtrip failed.' }
-      - name: Download actual published 0.4.8 installer and reviewed 0.4.9 candidate
-        shell: pwsh
-        run: |
-          if ($env:QA_TAG -notmatch '^qa-[A-Za-z0-9-]+$' -or $env:TARGET_TAG -ne 'v0.4.9') { throw 'Unexpected release inputs.' }
-          New-Item -ItemType Directory -Force inputs/base, inputs/update, inputs/tools, evidence | Out-Null
-          gh release download v0.4.8 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/base
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download published base installer.' }
-          $baseHash = (Get-FileHash inputs/base/Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($baseHash -ne 'ce99ebc69a75acce886f7c85223afa7f4f4596b981fe2897dbacbfb15182e117') { throw 'Published 0.4.8 installer digest mismatch.' }
-          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Test-VelopackInstaller.ps1 --dir inputs/tools
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download reviewed harness.' }
-          $harnessHash = (Get-FileHash inputs/tools/Test-VelopackInstaller.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($harnessHash -ne '22701653bb76fb1869faf426fae83eb69938bc5101e5d4ba132f5766d7d878b0') { throw 'Reviewed test harness digest mismatch.' }
-          gh release download $env:TARGET_TAG --repo $env:GITHUB_REPOSITORY --pattern '*.nupkg' --pattern 'releases.win-x64.json' --pattern 'installer-build.json' --dir inputs/update
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download candidate update artifacts.' }
-          $manifest = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
-          if ($manifest.appVersion -ne '0.4.9' -or $manifest.packId -ne 'Focoach.Desktop' -or $manifest.channel -ne 'win-x64') { throw 'Unexpected candidate identity.' }
-          if ($null -ne $manifest.sourceCommit -or !$manifest.sourceTreeDirty -or $manifest.sourceInputsSha256 -ne '290cef70a3b38721586538c17c52bcf9ef046e2dda46d689697b07fc90a7909f') { throw 'Candidate provenance mismatch.' }
-          $candidateHash = (Get-FileHash inputs/update/Focoach.Desktop-0.4.9-win-x64-full.nupkg -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($candidateHash -ne '03438788f00c2de02efbfc4b7a69802e67b65d5d8aeef183d7dc756de9ecd05f') { throw 'Reviewed 0.4.9 full package digest mismatch.' }
-          $feed = Get-Content inputs/update/releases.win-x64.json -Raw | ConvertFrom-Json
-          foreach ($asset in $feed.Assets) {
-            if ([IO.Path]::GetFileName($asset.FileName) -ne $asset.FileName) { throw 'Unsafe package filename.' }
-            $file = Join-Path inputs/update $asset.FileName
-            if ((Get-Item $file).Length -ne $asset.Size -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.SHA256.ToLowerInvariant()) { throw 'Candidate package integrity mismatch.' }
-          }
-          Get-ChildItem inputs -File -Recurse | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}}, Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
-      - name: Verify actual 0.4.8 to 0.4.9 update and saved login and records
-        shell: pwsh
-        run: |
-          $arguments = @{
-            InstallerPath = 'inputs/base/Focoach.Desktop-win-x64-Setup.exe'
-            ExpectedVersion = '0.4.8'
-            UpdatePackagePath = 'inputs/update/Focoach.Desktop-0.4.9-win-x64-full.nupkg'
-            UpdatedVersion = '0.4.9'
-            ArtifactsDirectory = 'evidence'
-            RequireProductionConfiguration = $true
-            UseProductionUpdateFeed = ($env:PRODUCTION_FEED -eq 'true')
-          }
-          ./inputs/tools/Test-VelopackInstaller.ps1 @arguments
-          # The old published 0.4.8 intentionally has no feedback UI. Require
-          # the new feedback screenshots only after updating to actual 0.4.9.
-          foreach ($language in @('ko', 'en')) {
-            $screenshot = "evidence/updated-wpf-screenshots/feedback-$language.png"
-            if (!(Test-Path -LiteralPath $screenshot -PathType Leaf) -or (Get-Item $screenshot).Length -le 0) { throw "Updated feedback screenshot missing: $language" }
-          }
-          $updatedSmoke = Get-Content evidence/updated-windows-smoke.txt -Raw
-          if (!$updatedSmoke.StartsWith('PASS:')) { throw 'Updated 0.4.9 WPF smoke did not pass.' }
-          [ordered]@{ status = 'PASS'; version = '0.4.9'; feedbackLocales = @('ko','en');
-            feedbackUpdateDeferralSmokePassed = $true; guestNetworkBlockedInSmoke = $true;
-            actualPublishedBaseVersion = '0.4.8'; baseInstallerSha256 = 'ce99ebc69a75acce886f7c85223afa7f4f4596b981fe2897dbacbfb15182e117';
-            targetFullSha256 = '03438788f00c2de02efbfc4b7a69802e67b65d5d8aeef183d7dc756de9ecd05f'
-          } | ConvertTo-Json | Set-Content evidence/feedback-native-checks.json
-      - name: Verify new 0.4.9 Setup fresh install, feedback and removal
+      - name: Download the unpublished candidate and verify its digest
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force inputs/setup, evidence/fresh-setup | Out-Null
-          gh release download $env:TARGET_TAG --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/setup
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download the new 0.4.9 Setup executable.' }
-          $setup = (Resolve-Path inputs/setup/Focoach.Desktop-win-x64-Setup.exe).Path
-          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($setupHash -ne 'dc7c39a13badcebbd8d39d758e8b0f6c7076e49631dd17e045e69f19123b4866') { throw 'Reviewed 0.4.9 Setup digest mismatch.' }
-          $freshEvidence = [IO.Path]::GetFullPath('evidence/fresh-setup')
-          $freshRoot = Join-Path ([IO.Path]::GetTempPath()) ('focoach-feedback-setup-' + [Guid]::NewGuid().ToString('N'))
-          $install = Join-Path $freshRoot '한글 사용자\새 Focoach App'
-          $current = Join-Path $install 'current'
-          $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Focoach.Desktop'
-          if (Test-Path $registration) { throw 'The preceding upgrade harness did not remove its installation.' }
-          New-Item -ItemType Directory -Force $freshRoot | Out-Null
-          $originalReviewDirectory = $env:FOCOACH_REVIEW_DIRECTORY
-          $freshRemoved = $false
-          function Invoke-FreshProcess([string]$File, [string[]]$ProcessArguments, [string]$Stage, [int]$Timeout = 180) {
-            $info = [Diagnostics.ProcessStartInfo]::new()
-            $info.FileName = $File; $info.UseShellExecute = $false
-            $info.WorkingDirectory = Split-Path $File -Parent
-            foreach ($argument in $ProcessArguments) { $info.ArgumentList.Add($argument) }
+          New-Item -ItemType Directory -Force inputs, app, evidence, evidence/screenshots | Out-Null
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern windows-design-review.zip --dir inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Unpublished candidate download failed.' }
+          $hash = (Get-FileHash inputs/windows-design-review.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '9c4a915a37e6694550d263b83857722cefd56098d900fd1049bd4917ab3c09dc') { throw 'Candidate digest mismatch.' }
+          Expand-Archive inputs/windows-design-review.zip app
+          [ordered]@{ packageSHA256=$hash; sourceCommit='aff5739884e7fcb72054692854424e8debcf7e49'; nativeWindows=$true } | ConvertTo-Json | Set-Content evidence/input.json
+      - name: Execute the actual WPF application with isolated synthetic profiles
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:FOCOACH_REVIEW_DIRECTORY = (Resolve-Path evidence/screenshots).Path
+          $env:FOCOACH_TEST_ACCOUNT_UI = '1'
+          $app = (Resolve-Path app/focoach.exe).Path
+          function Invoke-NativeSmoke([string]$Kind) {
+            $profile = Join-Path $env:RUNNER_TEMP ('focoach-design-' + $Kind + '-' + [Guid]::NewGuid().ToString('N'))
+            $info = [Diagnostics.ProcessStartInfo]::new($app)
+            $info.UseShellExecute = $false
+            $info.WorkingDirectory = Split-Path $app
+            $info.ArgumentList.Add('--data-directory'); $info.ArgumentList.Add($profile); $info.ArgumentList.Add('--smoke-test')
+            if ($Kind -eq 'account') { $info.ArgumentList.Add('--account-smoke-test') }
             $process = [Diagnostics.Process]::Start($info)
-            if ($null -eq $process) { throw "Could not start $Stage." }
             try {
-              if (!$process.WaitForExit($Timeout * 1000)) { $process.Kill($true); $process.WaitForExit(); throw "$Stage timed out." }
-              [ordered]@{ stage = $Stage; exitCode = $process.ExitCode } | ConvertTo-Json | Set-Content (Join-Path $freshEvidence ($Stage + '.json'))
-              if ($process.ExitCode -ne 0) { throw "$Stage failed with exit code $($process.ExitCode)." }
+              if (!$process.WaitForExit(180000)) { $process.Kill($true); throw "$Kind native smoke timed out." }
+              $code = $process.ExitCode
+              $resultName = if ($Kind -eq 'account') { 'account-smoke.txt' } else { 'windows-smoke.txt' }
+              $resultPath = Join-Path $profile $resultName
+              if ($code -ne 0 -or !(Test-Path $resultPath) -or !(Get-Content $resultPath -Raw).StartsWith('PASS:')) { throw "$Kind native smoke failed ($code)." }
             } finally {
-              if (!$process.HasExited) { $process.Kill($true); $process.WaitForExit() }
+              if (Test-Path $profile) {
+                Get-ChildItem $profile -Recurse -Filter '*smoke.txt' | ForEach-Object {
+                  Copy-Item $_.FullName (Join-Path 'evidence' ($Kind + '-' + $_.Name))
+                  Write-Host ($_.Name + ': ' + (Get-Content $_.FullName -Raw))
+                }
+              }
               $process.Dispose()
             }
           }
-          try {
-            Invoke-FreshProcess $setup @('--silent','--installto',$install,'--log',(Join-Path $freshEvidence 'install.log')) 'install' 300
-            $version = ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $current 'focoach.dll')).ProductVersion -split '\+')[0]
-            if ($version -ne '0.4.9') { throw 'Fresh installed application has the wrong version.' }
-            $entry = Get-ItemProperty $registration
-            if ($entry.DisplayVersion -ne '0.4.9' -or [IO.Path]::GetFullPath($entry.InstallLocation).TrimEnd('\') -ine $install.TrimEnd('\')) { throw 'Fresh installation registration mismatch.' }
-            foreach ($kind in @('wpf','account')) {
-              $smokeProfile = Join-Path $freshRoot ('새 검사 기록-' + $kind)
-              $env:FOCOACH_REVIEW_DIRECTORY = Join-Path $freshEvidence ($kind + '-screenshots')
-              $arguments = @('--data-directory',$smokeProfile,'--smoke-test')
-              $resultName = 'windows-smoke.txt'
-              if ($kind -eq 'account') { $arguments += '--account-smoke-test'; $resultName = 'account-smoke.txt' }
-              Invoke-FreshProcess (Join-Path $current 'focoach.exe') $arguments $kind 180
-              $result = Get-Content (Join-Path $smokeProfile $resultName) -Raw
-              $result | Set-Content (Join-Path $freshEvidence ($kind + '-smoke.txt'))
-              if (!$result.StartsWith('PASS:')) { throw "Fresh $kind smoke failed." }
-            }
-            foreach ($language in @('ko','en')) {
-              $screenshot = Join-Path $freshEvidence "wpf-screenshots/feedback-$language.png"
-              if (!(Test-Path $screenshot -PathType Leaf) -or (Get-Item $screenshot).Length -le 0) { throw "Fresh feedback screenshot missing: $language" }
-            }
-            Invoke-FreshProcess (Join-Path $install 'Update.exe') @('--silent','--log',(Join-Path $freshEvidence 'uninstall.log'),'uninstall') 'uninstall' 180
-            $deadline = [DateTime]::UtcNow.AddSeconds(15)
-            while ((Test-Path (Join-Path $current 'focoach.exe')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-            if ((Test-Path (Join-Path $current 'focoach.exe')) -or (Test-Path $registration)) { throw 'Fresh installation was not fully removed.' }
-            $freshRemoved = $true
-            [ordered]@{ status = 'PASS'; version = $version; setupSha256 = $setupHash; wpfSmoke = 'PASS'; accountSmoke = 'PASS'; feedbackLocales = @('ko','en'); removed = $true } | ConvertTo-Json | Set-Content evidence/fresh-setup-checks.json
-          } catch {
-            [ordered]@{ status = 'FAIL'; error = $_.Exception.Message; position = $_.InvocationInfo.PositionMessage } | ConvertTo-Json | Set-Content evidence/fresh-setup-checks.json
-            throw
-          } finally {
-            $env:FOCOACH_REVIEW_DIRECTORY = $originalReviewDirectory
-            if (!$freshRemoved -and (Test-Path (Join-Path $install 'Update.exe'))) {
-              try { Invoke-FreshProcess (Join-Path $install 'Update.exe') @('--silent','uninstall') 'cleanup-uninstall' 180 }
-              catch { Write-Warning "Fresh installation cleanup failed: $($_.Exception.Message)" }
-            }
-          }
-      - uses: actions/upload-artifact@v4
+          Invoke-NativeSmoke 'wpf'
+          Invoke-NativeSmoke 'account'
+          [ordered]@{ status='PASS'; screenshotCount=@(Get-ChildItem evidence/screenshots -Filter '*.png').Count;
+            assemblySHA256=(Get-FileHash app/focoach.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content evidence/result.json
+      - name: Keep evidence in the same unpublished draft
         if: always()
-        with:
-          name: native-windows-feedback-qa
-          retention-days: 3
-          path: evidence/
+        shell: pwsh
+        run: |
+          if (Test-Path evidence) {
+            Compress-Archive -Path evidence/* -DestinationPath windows-design-evidence.zip -Force
+            gh release upload $env:QA_TAG windows-design-evidence.zip --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Could not retain native review evidence.' }
+          }
