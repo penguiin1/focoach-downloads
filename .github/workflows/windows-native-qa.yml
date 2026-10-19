@@ -1,0 +1,85 @@
+name: Windows installer native QA
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: windows-manual-update-private-qa
+  cancel-in-progress: false
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QA_TAG: qa-manual-update-20261019-f0a2c3b
+      FOCOACH_TEST_ACCOUNT_UI: '1'
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate Windows and unpublished QA destination
+        shell: pwsh
+        run: |
+          if (!$IsWindows) { throw 'A real Windows host is required.' }
+          $release = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$release.isDraft) { throw 'QA inputs and evidence must remain unpublished.' }
+          $plain = [Text.Encoding]::UTF8.GetBytes('isolated-user-requested-update-qa')
+          $encrypted = [Security.Cryptography.ProtectedData]::Protect($plain, $null, 'CurrentUser')
+          if ([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, 'CurrentUser')) -ne [Convert]::ToBase64String($plain)) { throw 'DPAPI roundtrip failed.' }
+      - name: Download and verify reviewed isolated fixtures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force inputs/base, inputs/update, inputs/tools, evidence | Out-Null
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern 'Base-Focoach.Desktop-win-x64-Setup.exe' --pattern 'base-installer-build.json' --dir inputs/base
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download base fixture.' }
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern '*.nupkg' --pattern 'releases.win-x64.json' --pattern 'installer-build.json' --pattern 'source-inputs.json' --dir inputs/update
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download target fixture.' }
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern 'Test-VelopackInstaller.ps1' --dir inputs/tools
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download reviewed harness.' }
+          $expected = @{
+            'inputs/base/Base-Focoach.Desktop-win-x64-Setup.exe' = 'ae233cb8004205c141a310c75659030f5c8f922b50a04360566be4c8534a962b'
+            'inputs/update/Focoach.Desktop-0.4.11-win-x64-full.nupkg' = 'ad47bdf495e9a7408942aeb21e58aea190899b06fc78091df354c7c9ab919778'
+            'inputs/tools/Test-VelopackInstaller.ps1' = 'e938c7519fb8ca0cffef39f93ff59d8e51ff564ac32084332b417fd45f0cbd9b'
+          }
+          foreach ($file in $expected.Keys) {
+            if ((Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[$file]) { throw 'Fixture digest mismatch.' }
+          }
+          $base = Get-Content inputs/base/base-installer-build.json -Raw | ConvertFrom-Json
+          $target = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
+          if ($base.appVersion -ne '0.4.10' -or $target.appVersion -ne '0.4.11' -or
+              $null -ne $base.sourceCommit -or $null -ne $target.sourceCommit -or !$base.sourceTreeDirty -or !$target.sourceTreeDirty -or
+              $base.baselineCommit -ne 'f0a2c3b5175c5849cb878897dd0b2d4550993bc2' -or $target.baselineCommit -ne 'f0a2c3b5175c5849cb878897dd0b2d4550993bc2' -or
+              $base.sourceInputsSha256 -ne '9ec9816bc172fbe99016fe35369c3dda8106b867316d536925a118bb1129ea0a' -or $target.sourceInputsSha256 -ne '9ec9816bc172fbe99016fe35369c3dda8106b867316d536925a118bb1129ea0a') { throw 'Fixture source provenance mismatch.' }
+          $sources = Get-Content inputs/update/source-inputs.json -Raw | ConvertFrom-Json
+          if ($sources.sha256 -ne '9ec9816bc172fbe99016fe35369c3dda8106b867316d536925a118bb1129ea0a') { throw 'Source input fingerprint mismatch.' }
+          $feed = Get-Content inputs/update/releases.win-x64.json -Raw | ConvertFrom-Json
+          foreach ($asset in $feed.Assets) {
+            if ([IO.Path]::GetFileName($asset.FileName) -ne $asset.FileName) { throw 'Unsafe package filename.' }
+            $file = Join-Path inputs/update $asset.FileName
+            if ((Get-Item $file).Length -ne $asset.Size -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.SHA256.ToLowerInvariant()) { throw 'Feed package integrity mismatch.' }
+          }
+          Get-ChildItem inputs -File -Recurse | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}},Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
+      - name: Verify download, no automatic restart or quit apply, then native user click
+        shell: pwsh
+        run: |
+          ./inputs/tools/Test-VelopackInstaller.ps1 -InstallerPath inputs/base/Base-Focoach.Desktop-win-x64-Setup.exe -ExpectedVersion '0.4.10' -UpdatePackagePath inputs/update/Focoach.Desktop-0.4.11-win-x64-full.nupkg -UpdatedVersion '0.4.11' -ArtifactsDirectory evidence -RequireProductionConfiguration -RequireUserRequestedRestart
+          $result = Get-Content evidence/installer-checks.json -Raw | ConvertFrom-Json
+          if ($result.status -ne 'PASS') { throw 'Native installer checks failed.' }
+          foreach ($language in @('ko','en')) {
+            if (!(Test-Path -LiteralPath "evidence/update-choice-screenshots/update-ready-header-$language.png" -PathType Leaf)) { throw 'Ready action screenshot missing.' }
+          }
+      - name: Retain evidence only in the unpublished QA draft
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$release.isDraft) { throw 'QA evidence destination must remain unpublished.' }
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          [ordered]@{ runId=$env:GITHUB_RUN_ID; attempt=$env:GITHUB_RUN_ATTEMPT; sourceInputsSha256='9ec9816bc172fbe99016fe35369c3dda8106b867316d536925a118bb1129ea0a'; sourceCommit=$null; sourceTreeDirty=$true; baselineCommit='f0a2c3b5175c5849cb878897dd0b2d4550993bc2'; baseVersion='0.4.10'; updatedVersion='0.4.11'; purpose='Isolated version override fixture, not a release' } | ConvertTo-Json | Set-Content evidence/run.json
+          $archive = "native-manual-update-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip"
+          Compress-Archive -Path evidence -DestinationPath $archive -CompressionLevel Optimal
+          gh release upload $env:QA_TAG --repo $env:GITHUB_REPOSITORY $archive --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not preserve QA evidence.' }
