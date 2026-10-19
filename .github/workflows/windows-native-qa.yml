@@ -15,7 +15,9 @@ on:
         type: boolean
         default: false
 permissions:
-  contents: read
+  # GitHub hides draft releases from read-only installations. This reviewed
+  # workflow downloads draft inputs; it never publishes or changes a release.
+  contents: write
 concurrency:
   group: windows-feedback-release-qa
   cancel-in-progress: false
@@ -51,10 +53,15 @@ jobs:
           if ($baseHash -ne 'ce99ebc69a75acce886f7c85223afa7f4f4596b981fe2897dbacbfb15182e117') { throw 'Published 0.4.8 installer digest mismatch.' }
           gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Test-VelopackInstaller.ps1 --dir inputs/tools
           if ($LASTEXITCODE -ne 0) { throw 'Could not download reviewed harness.' }
+          $harnessHash = (Get-FileHash inputs/tools/Test-VelopackInstaller.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($harnessHash -ne '22701653bb76fb1869faf426fae83eb69938bc5101e5d4ba132f5766d7d878b0') { throw 'Reviewed test harness digest mismatch.' }
           gh release download $env:TARGET_TAG --repo $env:GITHUB_REPOSITORY --pattern '*.nupkg' --pattern 'releases.win-x64.json' --pattern 'installer-build.json' --dir inputs/update
           if ($LASTEXITCODE -ne 0) { throw 'Could not download candidate update artifacts.' }
           $manifest = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
           if ($manifest.appVersion -ne '0.4.9' -or $manifest.packId -ne 'Focoach.Desktop' -or $manifest.channel -ne 'win-x64') { throw 'Unexpected candidate identity.' }
+          if ($null -ne $manifest.sourceCommit -or !$manifest.sourceTreeDirty -or $manifest.sourceInputsSha256 -ne '9cbcdd3e5680a096c5b25152b7aff9a16ac1f76204b845582741fc7bd15e2c18') { throw 'Candidate provenance mismatch.' }
+          $candidateHash = (Get-FileHash inputs/update/Focoach.Desktop-0.4.9-win-x64-full.nupkg -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -ne '65969d8693a7aeaf28c5de52f653c9a31c681a59ed8fe3fd972f1782180a4ad5') { throw 'Reviewed 0.4.9 full package digest mismatch.' }
           $feed = Get-Content inputs/update/releases.win-x64.json -Raw | ConvertFrom-Json
           foreach ($asset in $feed.Assets) {
             if ([IO.Path]::GetFileName($asset.FileName) -ne $asset.FileName) { throw 'Unsafe package filename.' }
@@ -75,6 +82,19 @@ jobs:
             UseProductionUpdateFeed = ($env:PRODUCTION_FEED -eq 'true')
           }
           ./inputs/tools/Test-VelopackInstaller.ps1 @arguments
+          # The old published 0.4.8 intentionally has no feedback UI. Require
+          # the new feedback screenshots only after updating to actual 0.4.9.
+          foreach ($language in @('ko', 'en')) {
+            $screenshot = "evidence/updated-wpf-screenshots/feedback-$language.png"
+            if (!(Test-Path -LiteralPath $screenshot -PathType Leaf) -or (Get-Item $screenshot).Length -le 0) { throw "Updated feedback screenshot missing: $language" }
+          }
+          $updatedSmoke = Get-Content evidence/updated-windows-smoke.txt -Raw
+          if (!$updatedSmoke.StartsWith('PASS:')) { throw 'Updated 0.4.9 WPF smoke did not pass.' }
+          [ordered]@{ status = 'PASS'; version = '0.4.9'; feedbackLocales = @('ko','en');
+            feedbackUpdateDeferralSmokePassed = $true; guestNetworkBlockedInSmoke = $true;
+            actualPublishedBaseVersion = '0.4.8'; baseInstallerSha256 = 'ce99ebc69a75acce886f7c85223afa7f4f4596b981fe2897dbacbfb15182e117';
+            targetFullSha256 = '65969d8693a7aeaf28c5de52f653c9a31c681a59ed8fe3fd972f1782180a4ad5'
+          } | ConvertTo-Json | Set-Content evidence/feedback-native-checks.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
