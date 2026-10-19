@@ -76,20 +76,22 @@ jobs:
             }
             if ((Get-Item $file).Length -ne $asset.Size -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.SHA256.ToLowerInvariant()) { throw 'Candidate package integrity mismatch.' }
           }
-          New-Item -ItemType Directory -Force inputs/base-fixture, inputs/manual-update | Out-Null
-          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern 'Base-Focoach.Desktop-win-x64-Setup.exe' --pattern 'base-installer-build.json' --pattern 'base-fixture-provenance.json' --dir inputs/base-fixture
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download the reviewed new-code older-version fixture.' }
-          $baseFixture = Get-Content inputs/base-fixture/base-installer-build.json -Raw | ConvertFrom-Json
-          $override = Get-Content inputs/base-fixture/base-fixture-provenance.json -Raw | ConvertFrom-Json
-          if ((Get-FileHash inputs/base-fixture/Base-Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2930a16ccf667aabde7e7a1beddc9d9512e2e59f43ea34760e34b5a7aa389fc7' -or
-              $baseFixture.appVersion -ne '0.4.10' -or $baseFixture.sourceCommit -ne 'b9e7b8b23046447ea43710e80d94fc63d13c7ca3' -or $baseFixture.sourceTreeDirty -or
-              $baseFixture.sourceInputsSha256 -ne '8b1c58935a575baab3ebee478ee6bcc8a9abbe8dbbf538a9beb1f2de2dd151f3' -or $override.purpose -ne 'QA-only Version override' -or $override.productVersion -ne '0.4.11') { throw 'Older-version fixture provenance mismatch.' }
-          # This fixture differs from the actual published 0.4.10 base. Use the
-          # exact candidate full bytes, with no delta generated for another base.
-          Copy-Item inputs/update/Focoach.Desktop-0.4.11-win-x64-full.nupkg inputs/manual-update/
-          $fullOnly = @($feed.Assets | Where-Object { $_.Version -eq '0.4.11' -and $_.Type -eq 'Full' })
-          if ($fullOnly.Count -ne 1 -or $fullOnly[0].SHA256.ToLowerInvariant() -ne 'ca37bb553ade520ffdee2a158f936421927cdf613f1cc17091dcb18339c5a75a') { throw 'Manual fixture must use the actual final candidate full package.' }
-          @{ Assets = @($fullOnly) } | ConvertTo-Json -Depth 10 | Set-Content inputs/manual-update/releases.win-x64.json
+          if ($env:PRODUCTION_FEED -ne 'true') {
+            New-Item -ItemType Directory -Force inputs/base-fixture, inputs/manual-update | Out-Null
+            gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern 'Base-Focoach.Desktop-win-x64-Setup.exe' --pattern 'base-installer-build.json' --pattern 'base-fixture-provenance.json' --dir inputs/base-fixture
+            if ($LASTEXITCODE -ne 0) { throw 'Could not download the reviewed new-code older-version fixture.' }
+            $baseFixture = Get-Content inputs/base-fixture/base-installer-build.json -Raw | ConvertFrom-Json
+            $override = Get-Content inputs/base-fixture/base-fixture-provenance.json -Raw | ConvertFrom-Json
+            if ((Get-FileHash inputs/base-fixture/Base-Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2930a16ccf667aabde7e7a1beddc9d9512e2e59f43ea34760e34b5a7aa389fc7' -or
+                $baseFixture.appVersion -ne '0.4.10' -or $baseFixture.sourceCommit -ne 'b9e7b8b23046447ea43710e80d94fc63d13c7ca3' -or $baseFixture.sourceTreeDirty -or
+                $baseFixture.sourceInputsSha256 -ne '8b1c58935a575baab3ebee478ee6bcc8a9abbe8dbbf538a9beb1f2de2dd151f3' -or $override.purpose -ne 'QA-only Version override' -or $override.productVersion -ne '0.4.11') { throw 'Older-version fixture provenance mismatch.' }
+            # This fixture differs from the actual published 0.4.10 base. Use the
+            # exact candidate full bytes, with no delta generated for another base.
+            Copy-Item inputs/update/Focoach.Desktop-0.4.11-win-x64-full.nupkg inputs/manual-update/
+            $fullOnly = @($feed.Assets | Where-Object { $_.Version -eq '0.4.11' -and $_.Type -eq 'Full' })
+            if ($fullOnly.Count -ne 1 -or $fullOnly[0].SHA256.ToLowerInvariant() -ne 'ca37bb553ade520ffdee2a158f936421927cdf613f1cc17091dcb18339c5a75a') { throw 'Manual fixture must use the actual final candidate full package.' }
+            @{ Assets = @($fullOnly) } | ConvertTo-Json -Depth 10 | Set-Content inputs/manual-update/releases.win-x64.json
+          }
           Get-ChildItem inputs -File -Recurse | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}}, Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
       - name: Verify actual 0.4.10 to 0.4.11 update and saved login and records
         shell: pwsh
@@ -120,6 +122,7 @@ jobs:
             targetFullSha256 = 'ca37bb553ade520ffdee2a158f936421927cdf613f1cc17091dcb18339c5a75a'
           } | ConvertTo-Json | Set-Content evidence/feedback-native-checks.json
       - name: Verify new update code waits for an explicit user restart into the actual candidate
+        if: ${{ !inputs.production_feed }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -130,6 +133,7 @@ jobs:
             if (!(Test-Path -LiteralPath "evidence/manual-fixture/update-choice-screenshots/update-ready-header-$language.png")) { throw 'Prepared restart UI screenshot missing.' }
           }
       - name: Verify new 0.4.11 Setup fresh install, feedback and removal
+        if: ${{ !inputs.production_feed }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
