@@ -29,21 +29,22 @@ jobs:
           $restored = [Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, 'CurrentUser')
           if ([Convert]::ToBase64String($plain) -ne [Convert]::ToBase64String($restored)) { throw 'DPAPI roundtrip failed.' }
           Write-Host "Native Windows: $([Environment]::OSVersion); interactive: $([Environment]::UserInteractive); DPAPI: passed"
-      - name: Download private draft QA inputs
+      - name: Download isolated base fixture and the published release
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force inputs, evidence | Out-Null
-          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --pattern 'Focoach.Desktop-0.4.9-win-x64-*.nupkg' --pattern qa-next-releases.win-x64.json --pattern Test-VelopackInstaller.ps1 --dir inputs
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern qa-base-0.4.7-Setup.exe --pattern Test-VelopackInstaller.ps1 --dir inputs
           if ($LASTEXITCODE -ne 0) { throw 'Could not download draft inputs.' }
-          foreach ($required in @('Focoach.Desktop-win-x64-Setup.exe', 'Focoach.Desktop-0.4.9-win-x64-full.nupkg', 'qa-next-releases.win-x64.json', 'Test-VelopackInstaller.ps1')) {
+          gh release download v0.4.8 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-0.4.8-win-x64-full.nupkg --dir inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the published release.' }
+          foreach ($required in @('qa-base-0.4.7-Setup.exe', 'Focoach.Desktop-0.4.8-win-x64-full.nupkg', 'Test-VelopackInstaller.ps1')) {
             if (!(Test-Path (Join-Path inputs $required))) { throw "Missing draft QA input: $required" }
           }
-          Move-Item inputs/qa-next-releases.win-x64.json inputs/releases.win-x64.json
           Get-ChildItem inputs -File | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path $_.Path -Leaf}}, Hash | ConvertTo-Json | Set-Content evidence/input-hashes.json
-      - name: Install, reinstall, update, preserve profile and uninstall
+      - name: Verify production GitHub update, saved login and records
         shell: pwsh
         run: |
-          ./inputs/Test-VelopackInstaller.ps1 -InstallerPath inputs/Focoach.Desktop-win-x64-Setup.exe -ExpectedVersion 0.4.8 -UpdatePackagePath inputs/Focoach.Desktop-0.4.9-win-x64-full.nupkg -UpdatedVersion 0.4.9 -ArtifactsDirectory evidence -RequireProductionConfiguration
+          ./inputs/Test-VelopackInstaller.ps1 -InstallerPath inputs/qa-base-0.4.7-Setup.exe -ExpectedVersion 0.4.7 -UpdatePackagePath inputs/Focoach.Desktop-0.4.8-win-x64-full.nupkg -UpdatedVersion 0.4.8 -ArtifactsDirectory evidence -RequireProductionConfiguration -UseProductionUpdateFeed
       - uses: actions/upload-artifact@v4
         if: always()
         with:
