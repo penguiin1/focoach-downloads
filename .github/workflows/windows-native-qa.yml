@@ -1,6 +1,16 @@
 name: Windows Google login hotfix native QA
 on:
   workflow_dispatch:
+    inputs:
+      production_feed:
+        description: Verify the already-published 0.4.13 public feed without rebuilding
+        type: boolean
+        default: false
+      target_full_sha256:
+        description: Frozen 0.4.13 full package SHA256 for production-feed verification
+        type: string
+        required: false
+        default: ''
 permissions:
   contents: write
 concurrency:
@@ -8,6 +18,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   hotfix:
+    if: ${{ !inputs.production_feed }}
     runs-on: windows-latest
     timeout-minutes: 40
     env:
@@ -215,3 +226,58 @@ jobs:
             & gh release upload $env:QA_TAG --repo $env:GITHUB_REPOSITORY @files --clobber
             if ($LASTEXITCODE -ne 0) { throw 'Could not preserve native installer and feed artifacts.' }
           }
+  production:
+    if: ${{ inputs.production_feed }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QA_TAG: qa-windows-google-login-0.4.13-20261023
+      SOURCE_COMMIT: ceafe7c3658f177274a4186cb242ef78e2ee75bb
+      TARGET_FULL_SHA256: ${{ inputs.target_full_sha256 }}
+      FOCOACH_TEST_ACCOUNT_UI: '1'
+      OPENAI_API_KEY: ''
+    steps:
+      - name: Verify public release and frozen inputs without rebuilding
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!$IsWindows -or $env:TARGET_FULL_SHA256 -notmatch '^[0-9a-f]{64}$') { throw 'Native Windows and the frozen target digest are required.' }
+          $qa = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$qa.isDraft) { throw 'QA source and evidence must remain unpublished.' }
+          $release = gh release view v0.4.13 --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.isDraft -or $release.isPrerelease) { throw '0.4.13 must already be a public stable release.' }
+          $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $latest.tag_name -ne 'v0.4.12') { throw 'Mac global latest must remain 0.4.12 for this verification.' }
+          New-Item -ItemType Directory -Force inputs/base, inputs/update, inputs/tools, evidence | Out-Null
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern Test-VelopackInstaller.ps1 --dir inputs/tools
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash inputs/tools/Test-VelopackInstaller.ps1 -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'e938c7519fb8ca0cffef39f93ff59d8e51ff564ac32084332b417fd45f0cbd9b') { throw 'Reviewed native harness digest mismatch.' }
+          gh release download v0.4.12 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/base
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash inputs/base/Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1b686440069d1f5c8f7273df87e7cefe4b2d70623a7b4d860d21b15b9e9e8e14') { throw 'Published 0.4.12 base installer digest mismatch.' }
+          gh release download v0.4.13 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-0.4.13-win-x64-full.nupkg --pattern installer-build.json --pattern releases.win-x64.json --dir inputs/update
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash inputs/update/Focoach.Desktop-0.4.13-win-x64-full.nupkg -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:TARGET_FULL_SHA256) { throw 'Published frozen 0.4.13 full package digest mismatch.' }
+          $manifest = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
+          if ($manifest.appVersion -ne '0.4.13' -or $manifest.sourceCommit -ne $env:SOURCE_COMMIT -or $manifest.sourceTreeDirty) { throw 'Published hotfix provenance mismatch.' }
+          [ordered]@{ status = 'PASS'; nativeWindows = $true; globalLatestTag = $latest.tag_name; targetPublicTag = 'v0.4.13'; fullSHA256 = $env:TARGET_FULL_SHA256; sourceCommit = $env:SOURCE_COMMIT; rebuildPerformed = $false } | ConvertTo-Json | Set-Content evidence/published-inputs.json
+      - name: Verify actual installed public GitHub updater selects 0.4.13
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./inputs/tools/Test-VelopackInstaller.ps1 -InstallerPath inputs/base/Focoach.Desktop-win-x64-Setup.exe -ExpectedVersion 0.4.12 -UpdatePackagePath inputs/update/Focoach.Desktop-0.4.13-win-x64-full.nupkg -UpdatedVersion 0.4.13 -ArtifactsDirectory evidence/production -RequireProductionConfiguration -RequireUserRequestedRestart -UseProductionUpdateFeed
+          $summary = Get-Content evidence/production/installer-checks.json -Raw | ConvertFrom-Json
+          $restart = Get-Content evidence/production/app-automatic-update-preservation.json -Raw | ConvertFrom-Json
+          if ($summary.status -ne 'PASS' -or $restart.status -ne 'PASS' -or $restart.updatedVersion -ne '0.4.13' -or !$restart.downloadedFromGitHub -or $restart.downloadedFromLoopback -or !$restart.userRequestedRestart -or !$restart.normalQuitDidNotApply -or !$restart.encryptedLoginBytesUnchanged -or !$restart.previousHistoryRestored -or !$restart.eventsUnchanged) { throw 'The actual public updater did not preserve and select the reviewed hotfix.' }
+          [ordered]@{ status = 'PASS'; sourceCommit = $env:SOURCE_COMMIT; baseVersion = '0.4.12'; windowsSelectedVersion = '0.4.13'; globalLatestTag = 'v0.4.12'; actualPublicGitHubTransport = $true; rebuilt = $false; savedLoginAndHistoryPreserved = $true; userRequestedRestart = $true; fullSHA256 = $env:TARGET_FULL_SHA256; runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"; checksPassed = @($summary.checks).Count } | ConvertTo-Json | Set-Content evidence/production-feed-success.json
+      - name: Preserve production transport evidence only in QA draft
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $qa = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$qa.isDraft) { throw 'Production QA evidence destination must remain unpublished.' }
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          [ordered]@{ runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; mode = 'production-feed-only'; sourceCommit = $env:SOURCE_COMMIT } | ConvertTo-Json | Set-Content evidence/run.json
+          $archive = "windows-google-login-production-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip"
+          Compress-Archive -Path evidence -DestinationPath $archive -CompressionLevel Optimal
+          gh release upload $env:QA_TAG --repo $env:GITHUB_REPOSITORY $archive --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not preserve production transport evidence.' }
