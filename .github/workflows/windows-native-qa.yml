@@ -275,6 +275,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or (Get-FileHash inputs/update/Focoach.Desktop-0.4.13-win-x64-full.nupkg -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:TARGET_FULL_SHA256) { throw 'Published frozen 0.4.13 full package digest mismatch.' }
           $manifest = Get-Content inputs/update/installer-build.json -Raw | ConvertFrom-Json
           if ($manifest.appVersion -ne '0.4.13' -or $manifest.sourceCommit -ne $env:SOURCE_COMMIT -or $manifest.sourceTreeDirty) { throw 'Published hotfix provenance mismatch.' }
+          $feed = Get-Content inputs/update/releases.win-x64.json -Raw | ConvertFrom-Json
+          $target = @($feed.Assets | Where-Object { $_.FileName -eq 'Focoach.Desktop-0.4.13-win-x64-full.nupkg' })
+          if ($target.Count -ne 1 -or $target[0].SHA256.ToLowerInvariant() -ne $env:TARGET_FULL_SHA256) { throw 'The public Windows feed does not reference the frozen target package.' }
           [ordered]@{ status = 'PASS'; nativeWindows = $true; globalLatestTag = $latest.tag_name; targetPublicTag = 'v0.4.13'; fullSHA256 = $env:TARGET_FULL_SHA256; sourceCommit = $env:SOURCE_COMMIT; rebuildPerformed = $false } | ConvertTo-Json | Set-Content evidence/published-inputs.json
       - name: Verify actual installed public GitHub updater selects 0.4.13
         shell: pwsh
@@ -284,7 +287,7 @@ jobs:
           $summary = Get-Content evidence/production/installer-checks.json -Raw | ConvertFrom-Json
           $restart = Get-Content evidence/production/app-automatic-update-preservation.json -Raw | ConvertFrom-Json
           if ($summary.status -ne 'PASS' -or $restart.status -ne 'PASS' -or $restart.updatedVersion -ne '0.4.13' -or !$restart.downloadedFromGitHub -or $restart.downloadedFromLoopback -or !$restart.userRequestedRestart -or !$restart.normalQuitDidNotApply -or !$restart.encryptedLoginBytesUnchanged -or !$restart.previousHistoryRestored -or !$restart.eventsUnchanged) { throw 'The actual public updater did not preserve and select the reviewed hotfix.' }
-          [ordered]@{ status = 'PASS'; sourceCommit = $env:SOURCE_COMMIT; baseVersion = '0.4.12'; windowsSelectedVersion = '0.4.13'; globalLatestTag = 'v0.4.12'; actualPublicGitHubTransport = $true; rebuilt = $false; savedLoginAndHistoryPreserved = $true; userRequestedRestart = $true; fullSHA256 = $env:TARGET_FULL_SHA256; runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"; checksPassed = @($summary.checks).Count } | ConvertTo-Json | Set-Content evidence/production-feed-success.json
+          [ordered]@{ status = 'PASS'; sourceCommit = $env:SOURCE_COMMIT; baseVersion = '0.4.12'; windowsSelectedVersion = '0.4.13'; globalLatestTag = 'v0.4.12'; actualPublicGitHubTransport = $true; rebuilt = $false; savedLoginAndHistoryPreserved = $true; userRequestedRestart = $true; publishedFullSHA256 = $env:TARGET_FULL_SHA256; runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"; checksPassed = @($summary.checks).Count } | ConvertTo-Json | Set-Content evidence/production-feed-success.json
       - name: Preserve production transport evidence only in QA draft
         if: always()
         shell: pwsh
