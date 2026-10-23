@@ -1,0 +1,209 @@
+name: Windows Google login hotfix native QA
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: windows-google-login-hotfix-0413
+  cancel-in-progress: false
+jobs:
+  hotfix:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QA_TAG: qa-windows-google-login-0.4.13-20261023
+      SOURCE_COMMIT: ceafe7c3658f177274a4186cb242ef78e2ee75bb
+      SOURCE_SHA256: d409886ec8393471f50d415f4c482f5bd8217d96793d3f48e306a480e498b628
+      BASE_VERSION: 0.4.12
+      TARGET_VERSION: 0.4.13
+      FOCOACH_TEST_ACCOUNT_UI: '1'
+      OPENAI_API_KEY: ''
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Restore exact private source from never-published QA inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!$IsWindows) { throw 'A native Windows runner is required.' }
+          $qa = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$qa.isDraft) { throw 'Private source must remain in the unpublished QA draft.' }
+          New-Item -ItemType Directory -Force inputs, source, evidence, evidence/screenshots | Out-Null
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern windows-google-login-source.zip --dir inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen source download failed.' }
+          $archive = 'inputs/windows-google-login-source.zip'
+          if ((Get-Item $archive).Length -ne 558820497 -or (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SOURCE_SHA256) { throw 'Frozen source digest mismatch.' }
+          Expand-Archive $archive source
+          git -C source config core.autocrlf false
+          git -C source config core.filemode false
+          $head = git -C source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_COMMIT) { throw 'Source commit mismatch.' }
+          $dirty = git -C source status --porcelain
+          if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Frozen source must have a clean tracked tree.' }
+          $version = ([xml](Get-Content source/Windows/Focoach.Windows/Focoach.Windows.csproj -Raw)).Project.PropertyGroup.Version | Select-Object -First 1
+          if ($version -ne $env:TARGET_VERSION) { throw 'Unexpected source product version.' }
+          $plain = [Text.Encoding]::UTF8.GetBytes('isolated-oauth-hotfix-qa')
+          $encrypted = [Security.Cryptography.ProtectedData]::Protect($plain, $null, 'CurrentUser')
+          $restored = [Security.Cryptography.ProtectedData]::Unprotect($encrypted, $null, 'CurrentUser')
+          if ([Convert]::ToBase64String($plain) -ne [Convert]::ToBase64String($restored)) { throw 'CurrentUser DPAPI is unavailable.' }
+          [ordered]@{ nativeWindows = $true; sourceCommit = $head; sourceSHA256 = $env:SOURCE_SHA256; trackedTreeClean = $true; privateSourceDestination = 'unpublished-draft-only' } | ConvertTo-Json | Set-Content evidence/source-input.json
+      - name: Snapshot immutable build inputs and run relevant account checks
+        shell: pwsh
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force build/windows | Out-Null
+          python scripts/package-windows.py --capture-source-snapshot build/windows/source-inputs-win-x64.json
+          if ($LASTEXITCODE -ne 0) { throw 'Source fingerprint capture failed.' }
+          foreach ($project in @('Focoach.Auth.Checks','Focoach.Onboarding.Checks','Focoach.Billing.Checks','Focoach.Update.Checks')) {
+            & dotnet run --project ('Windows/' + $project) -c Release 2>&1 | Tee-Object -FilePath (Join-Path '../evidence' ($project + '.txt'))
+            if ($LASTEXITCODE -ne 0) { throw "Relevant native check failed: $project" }
+          }
+      - name: Build exact Windows hotfix on Windows
+        shell: pwsh
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./Windows/Build.ps1 -Runtime win-x64 -NoArchive
+          python scripts/package-windows.py --verify-source-snapshot build/windows/source-inputs-win-x64.json
+          if ($LASTEXITCODE -ne 0) { throw 'Build changed source inputs.' }
+          $version = ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $pwd 'build/windows/win-x64/focoach.dll')).ProductVersion -split '\+')[0]
+          if ($version -ne $env:TARGET_VERSION) { throw 'Built product version mismatch.' }
+      - name: Run WPF and account smoke including null-process callback regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = (Resolve-Path source/build/windows/win-x64/focoach.exe).Path
+          foreach ($kind in @('wpf','account')) {
+            $profile = Join-Path $env:RUNNER_TEMP ('focoach-oauth-' + $kind + '-' + [Guid]::NewGuid().ToString('N'))
+            $screenshots = Join-Path (Resolve-Path evidence/screenshots).Path $kind
+            New-Item -ItemType Directory -Force $screenshots | Out-Null
+            $env:FOCOACH_REVIEW_DIRECTORY = $screenshots
+            $info = [Diagnostics.ProcessStartInfo]::new($app)
+            $info.UseShellExecute = $false
+            $info.WorkingDirectory = Split-Path $app
+            foreach ($argument in @('--data-directory',$profile,'--smoke-test')) { $info.ArgumentList.Add($argument) }
+            if ($kind -eq 'account') { $info.ArgumentList.Add('--account-smoke-test') }
+            $process = [Diagnostics.Process]::Start($info)
+            try {
+              if (!$process.WaitForExit(180000)) { $process.Kill($true); throw "$kind native smoke timed out." }
+              $resultName = if ($kind -eq 'account') { 'account-smoke.txt' } else { 'windows-smoke.txt' }
+              $resultPath = Join-Path $profile $resultName
+              if ($process.ExitCode -ne 0 -or !(Test-Path $resultPath) -or !(Get-Content $resultPath -Raw).StartsWith('PASS:')) { throw "$kind native smoke failed." }
+            } finally {
+              if (Test-Path $profile) { Get-ChildItem $profile -Recurse -File -Filter '*smoke*.txt' | ForEach-Object { Copy-Item $_.FullName (Join-Path 'evidence' ($kind + '-' + $_.Name)) -Force } }
+              $process.Dispose()
+            }
+          }
+          $env:FOCOACH_REVIEW_DIRECTORY = ''
+      - name: Retain and verify published 0.4.12 feed packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force inputs/base, source/build/windows/previous | Out-Null
+          $previous = (Resolve-Path source/build/windows/previous).Path
+          gh release download v0.4.12 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/base
+          if ($LASTEXITCODE -ne 0) { throw 'Published 0.4.12 installer download failed.' }
+          if ((Get-FileHash inputs/base/Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1b686440069d1f5c8f7273df87e7cefe4b2d70623a7b4d860d21b15b9e9e8e14') { throw 'Published base installer digest mismatch.' }
+          gh release download v0.4.12 --repo $env:GITHUB_REPOSITORY --pattern 'releases.win-x64.json' --pattern 'RELEASES-win-x64' --pattern '*.nupkg' --dir $previous
+          if ($LASTEXITCODE -ne 0) { throw 'Published feed package download failed.' }
+          $feed = Get-Content (Join-Path $previous 'releases.win-x64.json') -Raw | ConvertFrom-Json
+          foreach ($asset in $feed.Assets) {
+            if ([IO.Path]::GetFileName($asset.FileName) -ne $asset.FileName) { throw 'Unsafe published package filename.' }
+            $file = Join-Path $previous $asset.FileName
+            if (!(Test-Path $file -PathType Leaf) -or (Get-Item $file).Length -ne $asset.Size -or (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.SHA256.ToLowerInvariant()) { throw 'Published feed package integrity mismatch.' }
+          }
+          if ((Get-FileHash (Join-Path $previous 'Focoach.Desktop-0.4.12-win-x64-full.nupkg') -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'f6201757f5e716fc37ddc2b1318ae00546014aab22fb264e8f1b0bdebc86118a') { throw 'Published base full package digest mismatch.' }
+          [ordered]@{ status = 'PASS'; baseVersion = $env:BASE_VERSION; retainedPackages = @($feed.Assets).Count } | ConvertTo-Json | Set-Content evidence/published-base.json
+      - name: Package 0.4.13 installer and feed from verified native payload
+        shell: pwsh
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/package-windows.py --publish-directory build/windows/win-x64 --output-directory build/windows/installer --runtime win-x64 --previous-release-directory build/windows/previous --source-snapshot-path build/windows/source-inputs-win-x64.json --source-commit $env:SOURCE_COMMIT --source-run-url "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID" --require-public-configuration
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows packaging failed.' }
+          $manifest = Get-Content build/windows/installer/installer-build.json -Raw | ConvertFrom-Json
+          if ($manifest.appVersion -ne $env:TARGET_VERSION -or $manifest.sourceCommit -ne $env:SOURCE_COMMIT -or $manifest.sourceTreeDirty -or !$manifest.sourceInputsVerifiedAcrossBuild -or !$manifest.payloadUnchanged) { throw 'Native package provenance mismatch.' }
+          $feed = Get-Content build/windows/installer/releases.win-x64.json -Raw | ConvertFrom-Json
+          foreach ($asset in $feed.Assets) {
+            $path = Join-Path 'build/windows/installer' $asset.FileName
+            if ((Get-Item $path).Length -ne $asset.Size -or (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $asset.SHA256.ToLowerInvariant()) { throw 'Generated feed package integrity mismatch.' }
+          }
+          [ordered]@{ status = 'PASS'; version = $env:TARGET_VERSION; sourceCommit = $env:SOURCE_COMMIT; nativeWindowsBuild = $true; sourceInputsVerifiedAcrossBuild = $true; feedPackages = @($feed.Assets).Count; policy = 'existing-unsigned-preview' } | ConvertTo-Json | Set-Content ../evidence/native-package.json
+      - name: Verify actual published 0.4.12 upgrade and saved login and records
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./source/Windows/Installer/Test-VelopackInstaller.ps1 -InstallerPath inputs/base/Focoach.Desktop-win-x64-Setup.exe -ExpectedVersion 0.4.12 -UpdatePackagePath source/build/windows/installer/Focoach.Desktop-0.4.13-win-x64-full.nupkg -UpdatedVersion 0.4.13 -ArtifactsDirectory evidence/upgrade -RequireProductionConfiguration -RequireUserRequestedRestart
+          $summary = Get-Content evidence/upgrade/installer-checks.json -Raw | ConvertFrom-Json
+          $restart = Get-Content evidence/upgrade/app-automatic-update-preservation.json -Raw | ConvertFrom-Json
+          if ($summary.status -ne 'PASS' -or $restart.status -ne 'PASS' -or !$restart.waitedForUserRestart -or !$restart.userRequestedRestart -or !$restart.normalQuitDidNotApply -or !$restart.encryptedLoginBytesUnchanged -or !$restart.eventsUnchanged) { throw 'Actual published-base update did not preserve login, records and explicit restart.' }
+      - name: Fresh 0.4.13 Setup and installed account regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force evidence/fresh-setup | Out-Null
+          $setup = (Resolve-Path source/build/windows/installer/Focoach.Desktop-win-x64-Setup.exe).Path
+          $root = Join-Path $env:RUNNER_TEMP ('focoach-oauth-fresh-' + [Guid]::NewGuid().ToString('N'))
+          $install = Join-Path $root '한글 사용자\Focoach App'
+          $current = Join-Path $install 'current'
+          $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Focoach.Desktop'
+          if (Test-Path $registration) { throw 'Upgrade harness left an installation behind.' }
+          function Invoke-Fresh([string]$File, [string[]]$Arguments, [int]$Timeout = 180) {
+            $info = [Diagnostics.ProcessStartInfo]::new($File)
+            $info.UseShellExecute = $false; $info.WorkingDirectory = Split-Path $File
+            foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
+            $process = [Diagnostics.Process]::Start($info)
+            try {
+              if (!$process.WaitForExit($Timeout * 1000)) { $process.Kill($true); throw 'Fresh installed process timed out.' }
+              if ($process.ExitCode -ne 0) { throw "Fresh installed process failed: $($process.ExitCode)" }
+            } finally { $process.Dispose() }
+          }
+          $removed = $false
+          try {
+            New-Item -ItemType Directory -Force $root | Out-Null
+            Invoke-Fresh $setup @('--silent','--installto',$install,'--log',([IO.Path]::GetFullPath('evidence/fresh-setup/install.log'))) 300
+            $version = ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $current 'focoach.dll')).ProductVersion -split '\+')[0]
+            if ($version -ne $env:TARGET_VERSION -or (Get-ItemProperty $registration).DisplayVersion -ne $env:TARGET_VERSION) { throw 'Fresh installed version mismatch.' }
+            $profile = Join-Path $root 'Synthetic account records'
+            $screenshots = [IO.Path]::GetFullPath('evidence/fresh-setup/screenshots')
+            New-Item -ItemType Directory -Force $screenshots | Out-Null
+            $env:FOCOACH_REVIEW_DIRECTORY = $screenshots
+            Invoke-Fresh (Join-Path $current 'focoach.exe') @('--data-directory',$profile,'--smoke-test','--account-smoke-test')
+            $result = Get-Content (Join-Path $profile 'account-smoke.txt') -Raw
+            if (!$result.StartsWith('PASS:')) { throw 'Fresh installed account regression did not pass.' }
+            Get-ChildItem $profile -File -Recurse -Filter '*smoke*.txt' | ForEach-Object { Copy-Item $_.FullName (Join-Path 'evidence/fresh-setup' $_.Name) -Force }
+            Invoke-Fresh (Join-Path $install 'Update.exe') @('--silent','uninstall')
+            $deadline = [DateTime]::UtcNow.AddSeconds(20)
+            while ((Test-Path (Join-Path $current 'focoach.exe')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+            if ((Test-Path (Join-Path $current 'focoach.exe')) -or (Test-Path $registration)) { throw 'Fresh installed app was not fully removed.' }
+            $removed = $true
+            [ordered]@{ status = 'PASS'; version = $version; accountRegression = 'PASS'; nullProcessShellHandoffCovered = $true; removed = $true } | ConvertTo-Json | Set-Content evidence/fresh-setup/checks.json
+          } finally {
+            $env:FOCOACH_REVIEW_DIRECTORY = ''
+            if (!$removed -and (Test-Path (Join-Path $install 'Update.exe'))) { Invoke-Fresh (Join-Path $install 'Update.exe') @('--silent','uninstall') }
+          }
+          [ordered]@{ status = 'PASS'; sourceCommit = $env:SOURCE_COMMIT; version = $env:TARGET_VERSION; nativeWindowsBuild = $true; authOnboardingBillingUpdateChecks = 'PASS'; wpfAndAccountSmoke = 'PASS'; nullProcessShellHandoffCovered = $true; actualPublishedBase = $env:BASE_VERSION; upgradeLoginAndHistoryPreserved = $true; freshSetupAccountRegression = 'PASS'; runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"; privateEvidenceOnly = $true; publicPublication = $false } | ConvertTo-Json | Set-Content evidence/native-hotfix-success.json
+      - name: Preserve outputs privately in never-published QA draft
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $qa = gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$qa.isDraft) { throw 'QA source and evidence must never be published.' }
+          if (Test-Path evidence) {
+            [ordered]@{ runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; sourceCommit = $env:SOURCE_COMMIT; sourceSHA256 = $env:SOURCE_SHA256; candidateVersion = $env:TARGET_VERSION } | ConvertTo-Json | Set-Content evidence/run.json
+            Compress-Archive -Path evidence -DestinationPath "windows-google-login-native-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip" -CompressionLevel Optimal
+            gh release upload $env:QA_TAG --repo $env:GITHUB_REPOSITORY "windows-google-login-native-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.zip" --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Could not preserve private native evidence.' }
+          }
+          if (Test-Path source/build/windows/installer/installer-build.json) {
+            $files = @(Get-ChildItem source/build/windows/installer -File | ForEach-Object { $_.FullName })
+            & gh release upload $env:QA_TAG --repo $env:GITHUB_REPOSITORY @files --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Could not preserve native installer and feed artifacts.' }
+          }
