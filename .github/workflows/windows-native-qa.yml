@@ -80,13 +80,30 @@ jobs:
         working-directory: source
         run: |
           $ErrorActionPreference = 'Stop'
+          # Keep the already-published OCR runtime bytes instead of the runner image's new VC145 runtime.
+          New-Item -ItemType Directory -Force build/windows/previous, ../inputs/runtime-raw | Out-Null
+          gh release download v0.4.12 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-0.4.12-win-x64-full.nupkg --dir build/windows/previous
+          if ($LASTEXITCODE -ne 0) { throw 'Published OCR runtime source download failed.' }
+          $full = 'build/windows/previous/Focoach.Desktop-0.4.12-win-x64-full.nupkg'
+          if ((Get-FileHash $full -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'f6201757f5e716fc37ddc2b1318ae00546014aab22fb264e8f1b0bdebc86118a') { throw 'Published runtime source digest mismatch.' }
+          $package = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $full).Path)
+          try {
+            foreach ($name in @('msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll')) {
+              $entry = $package.GetEntry('lib/app/x64/' + $name)
+              if ($null -eq $entry) { throw 'Published OCR runtime file missing.' }
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, [IO.Path]::GetFullPath((Join-Path '../inputs/runtime-raw' $name)), $true)
+            }
+          } finally { $package.Dispose() }
+          dotnet run --project Windows/OcrRuntime/CrossPlatformVerifier.csproj -c Release -- export ../inputs/runtime-raw ../inputs/verified-runtime
+          if ($LASTEXITCODE -ne 0) { throw 'Published Microsoft runtime cryptographic verification failed.' }
+          $runtime = [IO.Path]::GetFullPath('../inputs/verified-runtime')
           # The OCR verifier uses Windows PowerShell 5.1. Avoid inheriting pwsh 7 modules.
           $modulePath = $env:PSModulePath
           $env:PSModulePath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
           try {
             & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Get-Command Get-AuthenticodeSignature | Select-Object -ExpandProperty Name'
             if ($LASTEXITCODE -ne 0) { throw 'Windows Authenticode module preflight failed.' }
-            ./Windows/Build.ps1 -Runtime win-x64 -NoArchive
+            ./Windows/Build.ps1 -Runtime win-x64 -NoArchive -VcRuntimeDirectory $runtime
           } finally { $env:PSModulePath = $modulePath }
           python scripts/package-windows.py --verify-source-snapshot build/windows/source-inputs-win-x64.json
           if ($LASTEXITCODE -ne 0) { throw 'Build changed source inputs.' }
@@ -128,7 +145,7 @@ jobs:
           gh release download v0.4.12 --repo $env:GITHUB_REPOSITORY --pattern Focoach.Desktop-win-x64-Setup.exe --dir inputs/base
           if ($LASTEXITCODE -ne 0) { throw 'Published 0.4.12 installer download failed.' }
           if ((Get-FileHash inputs/base/Focoach.Desktop-win-x64-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1b686440069d1f5c8f7273df87e7cefe4b2d70623a7b4d860d21b15b9e9e8e14') { throw 'Published base installer digest mismatch.' }
-          gh release download v0.4.12 --repo $env:GITHUB_REPOSITORY --pattern 'releases.win-x64.json' --pattern 'RELEASES-win-x64' --pattern '*.nupkg' --dir $previous
+          gh release download v0.4.12 --repo $env:GITHUB_REPOSITORY --pattern 'releases.win-x64.json' --pattern 'RELEASES-win-x64' --pattern '*.nupkg' --dir $previous --skip-existing
           if ($LASTEXITCODE -ne 0) { throw 'Published feed package download failed.' }
           $feed = Get-Content (Join-Path $previous 'releases.win-x64.json') -Raw | ConvertFrom-Json
           foreach ($asset in $feed.Assets) {
