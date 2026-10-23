@@ -69,7 +69,14 @@ jobs:
         working-directory: source
         run: |
           $ErrorActionPreference = 'Stop'
-          ./Windows/Build.ps1 -Runtime win-x64 -NoArchive
+          # The OCR verifier uses Windows PowerShell 5.1. Avoid inheriting pwsh 7 modules.
+          $modulePath = $env:PSModulePath
+          $env:PSModulePath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
+          try {
+            & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command 'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Get-Command Get-AuthenticodeSignature | Select-Object -ExpandProperty Name'
+            if ($LASTEXITCODE -ne 0) { throw 'Windows Authenticode module preflight failed.' }
+            ./Windows/Build.ps1 -Runtime win-x64 -NoArchive
+          } finally { $env:PSModulePath = $modulePath }
           python scripts/package-windows.py --verify-source-snapshot build/windows/source-inputs-win-x64.json
           if ($LASTEXITCODE -ne 0) { throw 'Build changed source inputs.' }
           $version = ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $pwd 'build/windows/win-x64/focoach.dll')).ProductVersion -split '\+')[0]
@@ -203,7 +210,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Could not preserve private native evidence.' }
           }
           if (Test-Path source/build/windows/installer/installer-build.json) {
-            $files = @(Get-ChildItem source/build/windows/installer -File | ForEach-Object { $_.FullName })
+            # Unchanged retained packages are already frozen locally and publicly; upload new outputs only.
+            $files = @(Get-ChildItem source/build/windows/installer -File | Where-Object { $_.Extension -ne '.nupkg' -or $_.Name.Contains('-0.4.13-') } | ForEach-Object { $_.FullName })
             & gh release upload $env:QA_TAG --repo $env:GITHUB_REPOSITORY @files --clobber
             if ($LASTEXITCODE -ne 0) { throw 'Could not preserve native installer and feed artifacts.' }
           }
