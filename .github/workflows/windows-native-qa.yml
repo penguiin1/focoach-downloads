@@ -86,7 +86,10 @@ jobs:
                   $global:LASTEXITCODE = 0
                   & $Action *> $log
                   if ($LASTEXITCODE -ne 0) { throw 'Private command failed.' }
-              } catch { throw "$Name failed. Details remain only in the never-published QA draft." }
+              } catch {
+                  $_ | Out-String | Add-Content -LiteralPath $log
+                  throw "$Name failed. Details remain only in the never-published QA draft."
+              }
               Write-Host "Completed private QA step: $Name"
           }
           function Restore-QASource {
@@ -153,7 +156,15 @@ jobs:
                   $stdout.Result | Set-Content (Join-Path $Destination 'stdout.txt')
                   $stderr.Result | Set-Content (Join-Path $Destination 'stderr.txt')
                   $result = Join-Path $Profile $resultName
-                  if ($process.ExitCode -ne 0 -or !(Test-Path $result) -or !(Get-Content $result -Raw).StartsWith('PASS:')) { throw 'Isolated native app check failed.' }
+                  $exists = Test-Path $result -PathType Leaf
+                  $resultText = if ($exists) { Get-Content $result -Raw } else { '' }
+                  $passed = if ($Kind -ceq 'local-agent') {
+                      $resultText -match '^PASS [1-9][0-9]* real WPF→controller→owned Python checks\.' -and
+                          $resultText.Contains('Model calls: 0. Screen observation: off.')
+                  } else { $resultText.StartsWith('PASS:') }
+                  [ordered]@{kind=$Kind;exitCode=$process.ExitCode;resultFile=$resultName;resultExists=$exists;passReport=$passed} |
+                      ConvertTo-Json | Set-Content (Join-Path $Destination 'process-check.json')
+                  if ($process.ExitCode -ne 0 -or !$exists -or !$passed) { throw 'Isolated native app check failed.' }
               } finally {
                   if (Test-Path $Profile) {
                       Get-ChildItem $Profile -Recurse -File -Filter '*smoke*.txt' | ForEach-Object { Copy-Item $_.FullName (Join-Path $Destination $_.Name) -Force }
@@ -411,7 +422,10 @@ jobs:
                   $global:LASTEXITCODE = 0
                   & $Action *> $log
                   if ($LASTEXITCODE -ne 0) { throw 'Private command failed.' }
-              } catch { throw "$Name failed. Details remain only in the never-published QA draft." }
+              } catch {
+                  $_ | Out-String | Add-Content -LiteralPath $log
+                  throw "$Name failed. Details remain only in the never-published QA draft."
+              }
               Write-Host "Completed private QA step: $Name"
           }
           function Restore-QASource {
@@ -478,7 +492,15 @@ jobs:
                   $stdout.Result | Set-Content (Join-Path $Destination 'stdout.txt')
                   $stderr.Result | Set-Content (Join-Path $Destination 'stderr.txt')
                   $result = Join-Path $Profile $resultName
-                  if ($process.ExitCode -ne 0 -or !(Test-Path $result) -or !(Get-Content $result -Raw).StartsWith('PASS:')) { throw 'Isolated native app check failed.' }
+                  $exists = Test-Path $result -PathType Leaf
+                  $resultText = if ($exists) { Get-Content $result -Raw } else { '' }
+                  $passed = if ($Kind -ceq 'local-agent') {
+                      $resultText -match '^PASS [1-9][0-9]* real WPF→controller→owned Python checks\.' -and
+                          $resultText.Contains('Model calls: 0. Screen observation: off.')
+                  } else { $resultText.StartsWith('PASS:') }
+                  [ordered]@{kind=$Kind;exitCode=$process.ExitCode;resultFile=$resultName;resultExists=$exists;passReport=$passed} |
+                      ConvertTo-Json | Set-Content (Join-Path $Destination 'process-check.json')
+                  if ($process.ExitCode -ne 0 -or !$exists -or !$passed) { throw 'Isolated native app check failed.' }
               } finally {
                   if (Test-Path $Profile) {
                       Get-ChildItem $Profile -Recurse -File -Filter '*smoke*.txt' | ForEach-Object { Copy-Item $_.FullName (Join-Path $Destination $_.Name) -Force }
