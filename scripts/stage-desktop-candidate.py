@@ -11,7 +11,7 @@ import zipfile
 REPO = "penguiin1/focoach-downloads"
 QA = "qa-desktop-release-0.4.20-20261028"
 TARGET = "v0.4.20"
-SOURCE = "c57f189f4ff0d59fe6d9dfd49fe43fdea5140522"
+SOURCE = "dd6449a54d6761674d8976c6bdbf9e6d12e7272b"
 BASE = "v0.4.13"
 BASE_FEED_HASH = "0d93be2daf6bd1be04ed85d5239f95806d9659d9a6277a39394ad8ce865ae4a9"
 METADATA = {"installer-build.json", "source-inputs.json", "releases.win-x64.json", "assets.win-x64.json", "RELEASES-win-x64"}
@@ -89,13 +89,13 @@ def main():
         assert frozen["sourceCommit"] == SOURCE and frozen["trackedTreeClean"] is True
         assert frozen["sourceSHA256"] == "8a1824856dda831b571c5d6d34aaf98a5478173c1e5f450f0cc1f2f5539ecc09"
         assert frozen["baseArchiveCommit"] == "87219763024d3f3649fd71cfb77b4fc10cc52790"
-        assert frozen["sourceRevisionSHA256"] == "03badb626a2e5a6fee9131e2f8e8c58e73a83a59deafa2f51f4989f3728f509c"
+        assert frozen["sourceRevisionSHA256"] == "5f05d7198ecde8d50db37fe358fecc40525c5f6a39a4b5459dc17d6927cb230f"
 
         manifest_path = download(QA, "installer-build.json", root / "metadata")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         assert manifest["appVersion"] == "0.4.20" and manifest["sourceCommit"] == SOURCE
         assert manifest["sourceTreeDirty"] is False and manifest["sourceInputsVerifiedAcrossBuild"] is True
-        assert manifest["sourceInputsSha256"] == "dae54c792c39ee6d19e1f5e0dc4a1a8268ecfb32b501d49b13c39aedba49f07b"
+        assert manifest["sourceInputsSha256"] == "fbac1edcdb7d4027f80d7760c2c1e480d67bb683bd07d57780234784611b6615"
         assert manifest["payloadUnchanged"] is True and manifest["installerFile"] == "Focoach.Desktop-win-x64-Setup.exe"
         feed_path = download(QA, "releases.win-x64.json", root / "metadata")
         feed = json.loads(feed_path.read_text(encoding="utf-8-sig"))
