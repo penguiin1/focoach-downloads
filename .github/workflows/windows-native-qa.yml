@@ -28,7 +28,11 @@ concurrency:
 env:
   GH_TOKEN: "${{ github.token }}"
   QA_TAG: "qa-desktop-release-0.4.20-20261028"
-  SOURCE_COMMIT: "87219763024d3f3649fd71cfb77b4fc10cc52790"
+  SOURCE_COMMIT: "128c5b4945091032462f75b7731d49d6d89b21ba"
+  SOURCE_BASE_COMMIT: "87219763024d3f3649fd71cfb77b4fc10cc52790"
+  SOURCE_REVISION_BUNDLE: "focoach-desktop-0.4.20-windows-qa-revision.bundle"
+  SOURCE_REVISION_SHA256: "416c1b9aa53361ddc187c42d2c33d7bcc36465f56560d3d9eeffeec05edc015c"
+  SOURCE_REVISION_SIZE: "1960"
   SOURCE_ARCHIVE: "focoach-desktop-0.4.20-source.zip"
   SOURCE_SHA256: "8a1824856dda831b571c5d6d34aaf98a5478173c1e5f450f0cc1f2f5539ecc09"
   SOURCE_SIZE: "585339167"
@@ -99,15 +103,30 @@ jobs:
               Expand-Archive -LiteralPath $archive -DestinationPath source
               git -C source config core.autocrlf false
               git -C source config core.filemode false
+              $baseHead = git -C source rev-parse HEAD
+              if ($LASTEXITCODE -ne 0 -or $baseHead -cne $env:SOURCE_BASE_COMMIT) { throw 'Base archive source commit mismatch.' }
+              if ($env:SOURCE_REVISION_SHA256 -notmatch '^[0-9a-f]{64}$' -or $env:SOURCE_REVISION_SIZE -notmatch '^[1-9][0-9]*$' -or
+                  $env:SOURCE_REVISION_BUNDLE -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.bundle$' -or $env:SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$') { throw 'A pinned source revision is required.' }
+              gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SOURCE_REVISION_BUNDLE --dir inputs
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision download failed.' }
+              $bundle = [IO.Path]::GetFullPath((Join-Path inputs $env:SOURCE_REVISION_BUNDLE))
+              if ((Get-Item $bundle).Length -ne [long]$env:SOURCE_REVISION_SIZE -or
+                  (Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:SOURCE_REVISION_SHA256) { throw 'Private source revision digest mismatch.' }
+              git -C source bundle verify $bundle
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision prerequisites mismatch.' }
+              git -C source fetch $bundle main
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision fetch failed.' }
+              git -C source checkout --detach $env:SOURCE_COMMIT
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision checkout failed.' }
               $head = git -C source rev-parse HEAD
-              if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_COMMIT) { throw 'Source commit mismatch.' }
+              if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_COMMIT) { throw 'Source revision commit mismatch.' }
               $dirty = git -C source status --porcelain
               if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Frozen source must have a clean tracked tree.' }
               $version = ([xml](Get-Content source/Windows/Focoach.Windows/Focoach.Windows.csproj -Raw)).Project.PropertyGroup.Version | Select-Object -First 1
               if ($version -cne $env:TARGET_VERSION) { throw 'Unexpected source product version.' }
               . ./source/Windows/Package-AgentRuntime.ps1
               Assert-FocoachPublicConfigurations ([IO.Path]::GetFullPath('source/Config/supabase.json')) ([IO.Path]::GetFullPath('source/Config/updates.json')) 'win-x64'
-              [ordered]@{ nativeWindows = $true; sourceCommit = $head; sourceSHA256 = $env:SOURCE_SHA256;
+              [ordered]@{ nativeWindows = $true; sourceCommit = $head; sourceSHA256 = $env:SOURCE_SHA256; baseArchiveCommit = $baseHead; sourceRevisionSHA256 = $env:SOURCE_REVISION_SHA256;
                   trackedTreeClean = $true; privateSourceDestination = 'never-published-draft-only' } |
                   ConvertTo-Json | Set-Content evidence/source-input.json
           }
@@ -401,15 +420,30 @@ jobs:
               Expand-Archive -LiteralPath $archive -DestinationPath source
               git -C source config core.autocrlf false
               git -C source config core.filemode false
+              $baseHead = git -C source rev-parse HEAD
+              if ($LASTEXITCODE -ne 0 -or $baseHead -cne $env:SOURCE_BASE_COMMIT) { throw 'Base archive source commit mismatch.' }
+              if ($env:SOURCE_REVISION_SHA256 -notmatch '^[0-9a-f]{64}$' -or $env:SOURCE_REVISION_SIZE -notmatch '^[1-9][0-9]*$' -or
+                  $env:SOURCE_REVISION_BUNDLE -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.bundle$' -or $env:SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$') { throw 'A pinned source revision is required.' }
+              gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SOURCE_REVISION_BUNDLE --dir inputs
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision download failed.' }
+              $bundle = [IO.Path]::GetFullPath((Join-Path inputs $env:SOURCE_REVISION_BUNDLE))
+              if ((Get-Item $bundle).Length -ne [long]$env:SOURCE_REVISION_SIZE -or
+                  (Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:SOURCE_REVISION_SHA256) { throw 'Private source revision digest mismatch.' }
+              git -C source bundle verify $bundle
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision prerequisites mismatch.' }
+              git -C source fetch $bundle main
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision fetch failed.' }
+              git -C source checkout --detach $env:SOURCE_COMMIT
+              if ($LASTEXITCODE -ne 0) { throw 'Private source revision checkout failed.' }
               $head = git -C source rev-parse HEAD
-              if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_COMMIT) { throw 'Source commit mismatch.' }
+              if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_COMMIT) { throw 'Source revision commit mismatch.' }
               $dirty = git -C source status --porcelain
               if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Frozen source must have a clean tracked tree.' }
               $version = ([xml](Get-Content source/Windows/Focoach.Windows/Focoach.Windows.csproj -Raw)).Project.PropertyGroup.Version | Select-Object -First 1
               if ($version -cne $env:TARGET_VERSION) { throw 'Unexpected source product version.' }
               . ./source/Windows/Package-AgentRuntime.ps1
               Assert-FocoachPublicConfigurations ([IO.Path]::GetFullPath('source/Config/supabase.json')) ([IO.Path]::GetFullPath('source/Config/updates.json')) 'win-x64'
-              [ordered]@{ nativeWindows = $true; sourceCommit = $head; sourceSHA256 = $env:SOURCE_SHA256;
+              [ordered]@{ nativeWindows = $true; sourceCommit = $head; sourceSHA256 = $env:SOURCE_SHA256; baseArchiveCommit = $baseHead; sourceRevisionSHA256 = $env:SOURCE_REVISION_SHA256;
                   trackedTreeClean = $true; privateSourceDestination = 'never-published-draft-only' } |
                   ConvertTo-Json | Set-Content evidence/source-input.json
           }

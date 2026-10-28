@@ -11,7 +11,7 @@ import zipfile
 REPO = "penguiin1/focoach-downloads"
 QA = "qa-desktop-release-0.4.20-20261028"
 TARGET = "v0.4.20"
-SOURCE = "87219763024d3f3649fd71cfb77b4fc10cc52790"
+SOURCE = "128c5b4945091032462f75b7731d49d6d89b21ba"
 BASE = "v0.4.13"
 BASE_FEED_HASH = "0d93be2daf6bd1be04ed85d5239f95806d9659d9a6277a39394ad8ce865ae4a9"
 METADATA = {"installer-build.json", "source-inputs.json", "releases.win-x64.json", "assets.win-x64.json", "RELEASES-win-x64"}
@@ -88,6 +88,8 @@ def main():
         assert proof["upgradeLoginAndHistoryPreserved"] is True and proof["publicPublication"] is False
         assert frozen["sourceCommit"] == SOURCE and frozen["trackedTreeClean"] is True
         assert frozen["sourceSHA256"] == "8a1824856dda831b571c5d6d34aaf98a5478173c1e5f450f0cc1f2f5539ecc09"
+        assert frozen["baseArchiveCommit"] == "87219763024d3f3649fd71cfb77b4fc10cc52790"
+        assert frozen["sourceRevisionSHA256"] == "416c1b9aa53361ddc187c42d2c33d7bcc36465f56560d3d9eeffeec05edc015c"
 
         manifest_path = download(QA, "installer-build.json", root / "metadata")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
