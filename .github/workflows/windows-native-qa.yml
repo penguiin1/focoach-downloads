@@ -28,11 +28,11 @@ concurrency:
 env:
   GH_TOKEN: "${{ github.token }}"
   QA_TAG: "qa-desktop-release-0.4.20-20261028"
-  SOURCE_COMMIT: "128c5b4945091032462f75b7731d49d6d89b21ba"
+  SOURCE_COMMIT: "3520577ef9464feaeec7abe6cea208d1fdc76de9"
   SOURCE_BASE_COMMIT: "87219763024d3f3649fd71cfb77b4fc10cc52790"
-  SOURCE_REVISION_BUNDLE: "focoach-desktop-0.4.20-windows-qa-revision.bundle"
-  SOURCE_REVISION_SHA256: "416c1b9aa53361ddc187c42d2c33d7bcc36465f56560d3d9eeffeec05edc015c"
-  SOURCE_REVISION_SIZE: "1960"
+  SOURCE_REVISION_BUNDLE: "focoach-desktop-0.4.20-windows-qa-revision-2.bundle"
+  SOURCE_REVISION_SHA256: "aed6959ed619cd2075430df8f9e10c25fa6135489890ce8dc8c8a17f4bc9c035"
+  SOURCE_REVISION_SIZE: "3166"
   SOURCE_ARCHIVE: "focoach-desktop-0.4.20-source.zip"
   SOURCE_SHA256: "8a1824856dda831b571c5d6d34aaf98a5478173c1e5f450f0cc1f2f5539ecc09"
   SOURCE_SIZE: "585339167"
@@ -164,44 +164,16 @@ jobs:
           '@ | Set-Content inputs/qa-helpers.ps1
           . ./inputs/qa-helpers.ps1
           Invoke-Private 'frozen-source' { Restore-QASource }
-      - name: "Full Python and native CSharp regressions"
+      - name: "Freeze actual source inputs before building"
         shell: "pwsh"
         working-directory: "source"
         run: |
           $ErrorActionPreference = 'Stop'
           . (Join-Path $env:GITHUB_WORKSPACE 'inputs/qa-helpers.ps1')
-          Invoke-Private 'full-python-and-native-csharp-regressions' {
+          Invoke-Private 'capture-source-inputs' {
               New-Item -ItemType Directory -Force build/windows | Out-Null
               python -X utf8 -B scripts/package-windows.py --capture-source-snapshot build/windows/source-inputs-win-x64.json
               if ($LASTEXITCODE -ne 0) { throw 'Source fingerprint capture failed.' }
-              python -X utf8 -B -m pip --isolated --disable-pip-version-check install -r LocalAgent/requirements.txt
-              if ($LASTEXITCODE -ne 0) { throw 'Agent test dependency installation failed.' }
-              python -X utf8 -B (Join-Path $env:GITHUB_WORKSPACE 'scripts/run-windows-python-checks.py')
-              if ($LASTEXITCODE -ne 0) { throw 'Python regressions failed.' }
-              foreach ($project in @('Focoach.Core.Checks','Focoach.Ai.Checks','Focoach.Jev.Checks','Focoach.Behavior.Checks','Focoach.Auth.Checks','Focoach.Onboarding.Checks','Focoach.Billing.Checks','Focoach.Speech.Checks','Focoach.Telemetry.Checks','Focoach.Analytics.Checks','Focoach.Update.Checks','Focoach.Planner.Checks','Focoach.Feedback.Checks')) {
-                  dotnet run --project ('Windows/' + $project) -c Release
-                  if ($LASTEXITCODE -ne 0) { throw 'A native CSharp regression failed.' }
-              }
-              $script = (Resolve-Path LocalAgent/desktop.py).Path; $python = (Get-Command python).Source
-              foreach ($mode in @('--launch-only','--recovery-only','--lifecycle-stop-only','--focus-report-only','--live-audit-only')) {
-                  dotnet run --project Windows/Focoach.LocalAgent.Checks -c Release -- $mode $script $python
-                  if ($LASTEXITCODE -ne 0) { throw 'A native agent boundary regression failed.' }
-              }
-              dotnet run --project Windows/Focoach.LocalAgent.Checks -c Release -- --state-stream-only $python
-              if ($LASTEXITCODE -ne 0) { throw 'Native state stream regression failed.' }
-              dotnet run --project Windows/Focoach.LocalAgent.Checks -c Release -- $script $python
-              if ($LASTEXITCODE -ne 0) { throw 'Real Python worker bridge regression failed.' }
-              ./Windows/Focoach.LocalAgent.Checks/PackageChecks.ps1
-              python -X utf8 -B Windows/Focoach.LocalAgent.Checks/PackageArchiveChecks.py
-              if ($LASTEXITCODE -ne 0) { throw 'Agent archive boundary regressions failed.' }
-              python -X utf8 -B scripts/build-agent-contract.py --check
-              if ($LASTEXITCODE -ne 0) { throw 'Shared server contract is stale.' }
-              node --test supabase/tests/agent_test.mjs supabase/tests/jev_test.mjs
-              if ($LASTEXITCODE -ne 0) { throw 'Gateway contract regressions failed.' }
-              $plain = [Text.Encoding]::UTF8.GetBytes('isolated-desktop-release-qa')
-              $encrypted = [Security.Cryptography.ProtectedData]::Protect($plain,$null,'CurrentUser')
-              $restored = [Security.Cryptography.ProtectedData]::Unprotect($encrypted,$null,'CurrentUser')
-              if ([Convert]::ToBase64String($plain) -cne [Convert]::ToBase64String($restored)) { throw 'CurrentUser DPAPI is unavailable.' }
           }
       - name: "Build exact Windows 0.4.20 product"
         shell: "pwsh"
@@ -247,6 +219,42 @@ jobs:
                   $profile = Join-Path $env:RUNNER_TEMP ('focoach-candidate-' + $kind + '-' + [Guid]::NewGuid().ToString('N'))
                   Invoke-IsolatedApp $app $profile $kind (Join-Path evidence $kind)
               }
+          }
+      - name: "Full Python and native CSharp regressions"
+        shell: "pwsh"
+        working-directory: "source"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:GITHUB_WORKSPACE 'inputs/qa-helpers.ps1')
+          Invoke-Private 'full-python-and-native-csharp-regressions' {
+              python -X utf8 -B -m pip --isolated --disable-pip-version-check install -r LocalAgent/requirements.txt
+              if ($LASTEXITCODE -ne 0) { throw 'Agent test dependency installation failed.' }
+              python -X utf8 -B (Join-Path $env:GITHUB_WORKSPACE 'scripts/run-windows-python-checks.py')
+              if ($LASTEXITCODE -ne 0) { throw 'Python regressions failed.' }
+              foreach ($project in @('Focoach.Core.Checks','Focoach.Ai.Checks','Focoach.Jev.Checks','Focoach.Behavior.Checks','Focoach.Auth.Checks','Focoach.Onboarding.Checks','Focoach.Billing.Checks','Focoach.Speech.Checks','Focoach.Telemetry.Checks','Focoach.Analytics.Checks','Focoach.Update.Checks','Focoach.Planner.Checks','Focoach.Feedback.Checks')) {
+                  dotnet run --project ('Windows/' + $project) -c Release
+                  if ($LASTEXITCODE -ne 0) { throw 'A native CSharp regression failed.' }
+              }
+              $script = (Resolve-Path LocalAgent/desktop.py).Path; $python = (Get-Command python).Source
+              foreach ($mode in @('--launch-only','--recovery-only','--lifecycle-stop-only','--focus-report-only','--live-audit-only')) {
+                  dotnet run --project Windows/Focoach.LocalAgent.Checks -c Release -- $mode $script $python
+                  if ($LASTEXITCODE -ne 0) { throw 'A native agent boundary regression failed.' }
+              }
+              dotnet run --project Windows/Focoach.LocalAgent.Checks -c Release -- --state-stream-only $python
+              if ($LASTEXITCODE -ne 0) { throw 'Native state stream regression failed.' }
+              dotnet run --project Windows/Focoach.LocalAgent.Checks -c Release -- $script $python
+              if ($LASTEXITCODE -ne 0) { throw 'Real Python worker bridge regression failed.' }
+              ./Windows/Focoach.LocalAgent.Checks/PackageChecks.ps1
+              python -X utf8 -B Windows/Focoach.LocalAgent.Checks/PackageArchiveChecks.py
+              if ($LASTEXITCODE -ne 0) { throw 'Agent archive boundary regressions failed.' }
+              python -X utf8 -B scripts/build-agent-contract.py --check
+              if ($LASTEXITCODE -ne 0) { throw 'Shared server contract is stale.' }
+              node --test supabase/tests/agent_test.mjs supabase/tests/jev_test.mjs
+              if ($LASTEXITCODE -ne 0) { throw 'Gateway contract regressions failed.' }
+              $plain = [Text.Encoding]::UTF8.GetBytes('isolated-desktop-release-qa')
+              $encrypted = [Security.Cryptography.ProtectedData]::Protect($plain,$null,'CurrentUser')
+              $restored = [Security.Cryptography.ProtectedData]::Unprotect($encrypted,$null,'CurrentUser')
+              if ([Convert]::ToBase64String($plain) -cne [Convert]::ToBase64String($restored)) { throw 'CurrentUser DPAPI is unavailable.' }
           }
       - name: "Retain every published 0.4.13 feed package"
         shell: "pwsh"
