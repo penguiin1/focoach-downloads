@@ -85,7 +85,7 @@ jobs:
               try {
                   $global:LASTEXITCODE = 0
                   & $Action *> $log
-                  if ($LASTEXITCODE -ne 0) { throw 'Private command failed.' }
+                  if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw 'Private command failed.' }
               } catch {
                   $_ | Out-String | Add-Content -LiteralPath $log
                   throw "$Name failed. Details remain only in the never-published QA draft."
@@ -421,7 +421,7 @@ jobs:
               try {
                   $global:LASTEXITCODE = 0
                   & $Action *> $log
-                  if ($LASTEXITCODE -ne 0) { throw 'Private command failed.' }
+                  if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw 'Private command failed.' }
               } catch {
                   $_ | Out-String | Add-Content -LiteralPath $log
                   throw "$Name failed. Details remain only in the never-published QA draft."
