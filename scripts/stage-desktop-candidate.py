@@ -81,6 +81,9 @@ def main():
         with zipfile.ZipFile(evidence_path) as z:
             proof = json.loads(z.read("evidence/native-release-success.json"))
             frozen = json.loads(z.read("evidence/source-input.json"))
+            evidence_run = json.loads(z.read("evidence/run.json"))
+        assert str(evidence_run["runId"]) == run_id and int(evidence_run["attempt"]) == run["run_attempt"]
+        assert evidence_run["sourceCommit"] == SOURCE
         assert proof["status"] == "PASS" and proof["sourceCommit"] == SOURCE
         assert proof["version"] == "0.4.20" and proof["actualPublishedBase"] == "0.4.13"
         assert proof["nativeWindowsBuild"] is True and proof["fullPythonAndCSharpChecks"] == "PASS"
@@ -94,6 +97,7 @@ def main():
         manifest_path = download(QA, "installer-build.json", root / "metadata")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         assert manifest["appVersion"] == "0.4.20" and manifest["sourceCommit"] == SOURCE
+        assert manifest["sourceRunUrl"] == proof["runUrl"] == f"https://github.com/{REPO}/actions/runs/{run_id}"
         assert manifest["sourceTreeDirty"] is False and manifest["sourceInputsVerifiedAcrossBuild"] is True
         assert manifest["sourceInputsSha256"] == "fbac1edcdb7d4027f80d7760c2c1e480d67bb683bd07d57780234784611b6615"
         assert manifest["payloadUnchanged"] is True and manifest["installerFile"] == "Focoach.Desktop-win-x64-Setup.exe"
