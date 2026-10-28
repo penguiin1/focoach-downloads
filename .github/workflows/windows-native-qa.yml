@@ -6,6 +6,15 @@ name: "Windows desktop 0.4.20 native release QA"
         description: "Verify already-published 0.4.20 feed without rebuilding"
         type: "boolean"
         default: false
+      stage_candidate:
+        description: "Copy only validated distributables into the separate unpublished v0.4.20 candidate"
+        type: "boolean"
+        default: false
+      candidate_run_id:
+        description: "Successful native candidate run whose private evidence is verified before staging"
+        type: "string"
+        required: false
+        default: "40611664088"
       target_full_sha256:
         description: "Frozen 0.4.20 full-package SHA256 for post-publication verification"
         type: "string"
@@ -39,7 +48,7 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
 jobs:
   candidate:
-    if: "${{ !inputs.production_feed }}"
+    if: "${{ !inputs.production_feed && !inputs.stage_candidate }}"
     runs-on: "windows-latest"
     timeout-minutes: 60
     steps:
@@ -345,7 +354,7 @@ jobs:
               }
           } catch { throw 'Could not preserve QA outputs in the never-published draft.' }
   production:
-    if: "${{ inputs.production_feed }}"
+    if: "${{ inputs.production_feed && !inputs.stage_candidate }}"
     runs-on: "windows-latest"
     timeout-minutes: 30
     env:
@@ -493,3 +502,13 @@ jobs:
                   if ($LASTEXITCODE -ne 0) { throw 'Private candidate upload failed.' }
               }
           } catch { throw 'Could not preserve QA outputs in the never-published draft.' }
+  stage:
+    if: "${{ inputs.stage_candidate && !inputs.production_feed }}"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 40
+    steps:
+      - uses: "actions/checkout@v4"
+      - name: "Stage only verified distributables in separate unpublished candidate"
+        env:
+          CANDIDATE_RUN_ID: "${{ inputs.candidate_run_id }}"
+        run: python3 scripts/stage-desktop-candidate.py
