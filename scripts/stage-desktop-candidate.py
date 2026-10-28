@@ -95,6 +95,7 @@ def main():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         assert manifest["appVersion"] == "0.4.20" and manifest["sourceCommit"] == SOURCE
         assert manifest["sourceTreeDirty"] is False and manifest["sourceInputsVerifiedAcrossBuild"] is True
+        assert manifest["sourceInputsSha256"] == "420f46ec1d72653f9625b36433bb22da66961fb1dc60333695364df857689161"
         assert manifest["payloadUnchanged"] is True and manifest["installerFile"] == "Focoach.Desktop-win-x64-Setup.exe"
         feed_path = download(QA, "releases.win-x64.json", root / "metadata")
         feed = json.loads(feed_path.read_text(encoding="utf-8-sig"))
