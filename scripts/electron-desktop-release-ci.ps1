@@ -27,6 +27,31 @@ function Write-Json($Value, [string]$Path) {
     $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding utf8NoBOM
 }
 
+function Get-PublicErrorType($Record) {
+    $name = $Record.Exception.GetType().Name
+    if ($name -in @('RuntimeException', 'IOException', 'UnauthorizedAccessException',
+        'InvalidDataException', 'InvalidOperationException', 'FileNotFoundException',
+        'DirectoryNotFoundException', 'JsonException', 'ArgumentException',
+        'MethodInvocationException', 'CommandNotFoundException', 'ParameterBindingException',
+        'ActionPreferenceStopException')) { return $name }
+    return 'OtherException'
+}
+
+function Get-TestDiagnostics([string]$Path) {
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    $diagnostics = [Collections.Generic.List[string]]::new()
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($line -match '^not ok [0-9]+(?: - [^\x00-\x1f]{1,200})?$') {
+            $diagnostics.Add($line)
+        } elseif ($line -match '^\s*(?:code|errorCode):\s*[\x27\x22]?(?<code>ERR_[A-Z0-9_]+|E[A-Z0-9_]+)[\x27\x22]?\s*$' -or
+            $line -match '^npm (?:ERR!|error) code (?<code>ERR_[A-Z0-9_]+|E[A-Z0-9_]+)\s*$') {
+            $diagnostics.Add('errorCode: ' + $Matches.code)
+        }
+        if ($diagnostics.Count -ge 30) { break }
+    }
+    return @($diagnostics | Select-Object -Unique)
+}
+
 function Read-SourceState {
     if (!(Test-Path -LiteralPath $stateFile -PathType Leaf)) { throw 'Verified source metadata is unavailable.' }
     return Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json -AsHashtable
@@ -114,24 +139,31 @@ if ($Phase -eq 'Restore') {
     }
     if (Test-Path -LiteralPath $private) { throw 'The private staging directory must be new.' }
     New-Item -ItemType Directory -Path $logs, $verification -Force | Out-Null
+    $restoreStage = 'lookup'
     try {
         $release = Assert-Draft $tag
         $sourceAssets = @($release.assets | Where-Object { $_.name -ceq $asset })
         if ($sourceAssets.Count -ne 1 -or $sourceAssets[0].size -le 0 -or $sourceAssets[0].size -gt 536870912) {
             throw 'Exactly one bounded source asset is required.'
         }
+        $restoreStage = 'download'
         & gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern $asset --dir $private *> (Join-Path $logs 'source-download.log')
         if ($LASTEXITCODE -ne 0) { throw 'The frozen source download failed.' }
+        $restoreStage = 'hash'
         $archive = Join-Path $private $asset
         $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ((Get-Item -LiteralPath $archive).Length -ne $sourceAssets[0].size -or $actual -cne $sha.ToLowerInvariant()) {
             throw 'The private source size or SHA-256 does not match its frozen input.'
         }
+        $restoreStage = 'lookup'
         $null = Assert-Draft $tag
+        $restoreStage = 'archive'
         Assert-Archive $archive
         $commit = Read-GitArchiveCommit $archive
+        $restoreStage = 'extract'
         New-Item -ItemType Directory -Path $source | Out-Null
         [IO.Compression.ZipFile]::ExtractToDirectory($archive, $source)
+        $restoreStage = 'package'
         $package = Get-Content -LiteralPath (Join-Path $source 'package.json') -Raw | ConvertFrom-Json
         if ($package.main -cne 'main/index.cjs' -or !$package.scripts.'release:desktop' -or
             $package.version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
@@ -148,8 +180,13 @@ if ($Phase -eq 'Restore') {
         Write-Json $state $stateFile
         Write-Json $state (Join-Path $verification 'source-input.json')
         Add-Content -LiteralPath $env:GITHUB_ENV -Value ('FOCOACH_SOURCE_COMMIT=' + $commit) -Encoding utf8NoBOM
+        Write-Json ([ordered]@{ success = $true; stage = 'package'; failureCode = $null; errorType = $null }) (Join-Path $verification 'source-restore.json')
         Write-Host 'Verified and restored the private source; no source content is printed.'
     } catch {
+        Write-Json ([ordered]@{
+            success = $false; stage = $restoreStage
+            failureCode = 'source-' + $restoreStage + '-failed'; errorType = Get-PublicErrorType $_
+        }) (Join-Path $verification 'source-restore.json')
         $_ | Out-String | Set-Content -LiteralPath (Join-Path $logs 'restore-error.log')
         throw 'Private source restoration failed; detailed source output is withheld.'
     }
@@ -164,18 +201,22 @@ if ($Phase -eq 'Build') {
         $started = [DateTimeOffset]::UtcNow
         $passed = $false
         $exitCode = 0
+        $errorType = $null
         $global:LASTEXITCODE = 0
         try {
             & $Action *> $log
             $exitCode = $LASTEXITCODE
-            if ($exitCode -ne 0) { throw 'The private command failed.' }
+            if ($exitCode -ne 0) { $errorType = 'NativeCommandExit'; throw 'The private command failed.' }
             $passed = $true
         } catch {
             if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE } else { $exitCode = 1 }
+            if (!$errorType) { $errorType = Get-PublicErrorType $_ }
             $_ | Out-String | Add-Content -LiteralPath $log
         }
         $summary.steps += [ordered]@{
             name = $Name; passed = $passed; exitCode = $exitCode
+            failureCode = $(if ($passed) { $null } else { 'build-step-failed' }); errorType = $errorType
+            diagnostics = @(if (!$passed -and $Name -ceq 'node-tests') { Get-TestDiagnostics $log })
             durationSeconds = [Math]::Round(([DateTimeOffset]::UtcNow - $started).TotalSeconds, 2)
         }
         Write-Json $summary $summaryFile
@@ -203,7 +244,10 @@ if ($Phase -eq 'Collect') {
     New-Item -ItemType Directory -Path $verification -Force | Out-Null
     $summary = if (Test-Path -LiteralPath $summaryFile) { Get-Content -LiteralPath $summaryFile -Raw | ConvertFrom-Json -AsHashtable } else { @{ success = $false; steps = @() } }
     $report = @('Private source and detailed command output are intentionally excluded.')
-    foreach ($step in $summary.steps) { $report += "$($step.name): passed=$($step.passed); exitCode=$($step.exitCode); seconds=$($step.durationSeconds)" }
+    foreach ($step in $summary.steps) {
+        $report += "$($step.name): passed=$($step.passed); exitCode=$($step.exitCode); errorType=$($step.errorType); seconds=$($step.durationSeconds)"
+        $report += @($step.diagnostics)
+    }
     $testLog = Join-Path $logs 'node-tests.log'
     if (Test-Path -LiteralPath $testLog) {
         $report += @(Get-Content -LiteralPath $testLog | Where-Object { $_ -match '^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) [0-9.]+$' })
