@@ -26,6 +26,10 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      # Draft releases are only visible with push access. The token is injected
+      # into Restore only; checkout does not persist it for source build steps.
+      contents: write
     timeout-minutes: 60
     defaults:
       run:
