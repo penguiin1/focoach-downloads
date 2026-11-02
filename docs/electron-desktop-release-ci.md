@@ -58,8 +58,14 @@ Artifact `electron-win-x64-release` contains:
   (`lookup`, `download`, `hash`, `archive`, `extract` or `package`), a fixed
   failure code and an allowlisted exception type. Build failures record their
   fixed step name, failure code and exception type. Failed Node tests may also
-  include at most 30 bounded TAP `not ok` lines or error codes; stack traces,
-  assertion values and command output remain private.
+  include at most 30 bounded TAP `not ok` lines or error codes; stack traces
+  and unrelated command output remain private.
+  Failed Node tests additionally produce `failed-tests.txt` with bounded TAP
+  diagnostic fields (`message`, `error`, `failureType`, `code`, `name`,
+  `operator`, `expected` and `actual`). Each failure is limited to 80 lines and
+  the report to 64 KiB; fields are limited to 12 lines and individual lines to
+  1,024 characters. Stack/source fields and all unrelated command output are
+  excluded. These assertions run only against isolated test fixtures.
 
 On failure, only sanitized verification is uploaded. Detailed errors, source
 archives and extracted source are never uploaded to the public artifact.

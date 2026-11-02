@@ -52,6 +52,49 @@ function Get-TestDiagnostics([string]$Path) {
     return @($diagnostics | Select-Object -Unique)
 }
 
+function Write-FailedTests([string]$Path, [string]$Output) {
+    $text = [Text.StringBuilder]::new()
+    $bytes = 0; $active = $false; $blockLines = 0; $fieldLines = 0
+    $captureField = $false; $skipIndent = -1
+    foreach ($line in [IO.File]::ReadLines($Path)) {
+        $candidate = $null
+        if ($line -match '^(?:ok|not ok) [0-9]+\b') {
+            $active = $line.StartsWith('not ok ')
+            $blockLines = 0; $fieldLines = 0; $captureField = $false; $skipIndent = -1
+            if ($active) { $candidate = $line }
+        } elseif ($active -and $blockLines -lt 80) {
+            if ($line -match '^  (?<key>[A-Za-z_]+):(?:\s|$)') {
+                $captureField = $Matches.key -in @('message', 'error', 'failureType', 'code', 'name', 'operator', 'expected', 'actual')
+                $fieldLines = 0; $skipIndent = -1
+            } elseif ($line -match '^\S|^  \S') {
+                $captureField = $false
+            }
+            if ($captureField) {
+                $indent = $line.Length - $line.TrimStart().Length
+                if ($skipIndent -ge 0 -and $line.Trim() -and $indent -le $skipIndent) { $skipIndent = -1 }
+                if ($line -match '^\s+(?:stack|source|sourceCode|sourceLine):') { $skipIndent = $indent }
+                if ($skipIndent -lt 0) {
+                    if ($fieldLines -lt 12) { $candidate = $line }
+                    elseif ($fieldLines -eq 12) { $candidate = '    [field truncated]' }
+                    $fieldLines++
+                }
+            }
+        }
+        if ($null -eq $candidate -or $blockLines -ge 80) { continue }
+        $candidate = $candidate -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ''
+        if ($candidate.Length -gt 1024) { $candidate = $candidate.Substring(0, 1024) + ' [line truncated]' }
+        $size = [Text.Encoding]::UTF8.GetByteCount($candidate + "`n")
+        if ($bytes + $size -gt 65500) {
+            $null = $text.Append("[report truncated]`n")
+            break
+        }
+        $null = $text.Append($candidate).Append("`n")
+        $bytes += $size; $blockLines++
+    }
+    if (!$text.Length) { $null = $text.Append("No top-level TAP failure block was emitted.`n") }
+    [IO.File]::WriteAllText($Output, $text.ToString(), [Text.UTF8Encoding]::new($false))
+}
+
 function Read-SourceState {
     if (!(Test-Path -LiteralPath $stateFile -PathType Leaf)) { throw 'Verified source metadata is unavailable.' }
     return Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json -AsHashtable
@@ -251,6 +294,9 @@ if ($Phase -eq 'Collect') {
     $testLog = Join-Path $logs 'node-tests.log'
     if (Test-Path -LiteralPath $testLog) {
         $report += @(Get-Content -LiteralPath $testLog | Where-Object { $_ -match '^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) [0-9.]+$' })
+        if ($summary.steps | Where-Object { $_.name -ceq 'node-tests' -and !$_.passed }) {
+            Write-FailedTests $testLog (Join-Path $verification 'failed-tests.txt')
+        }
     }
     $report | Set-Content -LiteralPath (Join-Path $verification 'verification.log') -Encoding utf8NoBOM
     if (!$summary.success) { Write-Host 'Only sanitized failure verification will be uploaded.'; exit 0 }
