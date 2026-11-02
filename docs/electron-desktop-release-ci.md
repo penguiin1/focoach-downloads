@@ -19,6 +19,8 @@ and reparse points are rejected before extraction. Source files and detailed
 command output stay under `RUNNER_TEMP` and are removed at job cleanup. No
 private repository token is needed: the job's read-only `GITHUB_TOKEN` reads the
 never-published source draft in this download repository.
+Draft lookup uses `gh release view` to resolve a numeric release API URL, validates
+its repository path, then checks the draft and publication fields through REST.
 
 The source must define `release:desktop`. The runner exposes the git archive's
 commit as `FOCOACH_SOURCE_COMMIT` for build provenance.

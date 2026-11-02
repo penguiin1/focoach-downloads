@@ -33,7 +33,14 @@ function Read-SourceState {
 }
 
 function Assert-Draft([string]$Tag) {
-    $raw = & gh api ('repos/' + $env:GITHUB_REPOSITORY + '/releases/tags/' + $Tag) 2> (Join-Path $logs 'release-api.stderr')
+    # The REST tag endpoint omits drafts. Resolve the draft's numeric API ID first.
+    $apiUrl = & gh release view $Tag --repo $env:GITHUB_REPOSITORY --json apiUrl --jq .apiUrl 2> (Join-Path $logs 'release-lookup.stderr')
+    if ($LASTEXITCODE -ne 0) { throw 'The source draft cannot be resolved with this run token.' }
+    if ($apiUrl -isnot [string] -or
+        $apiUrl -cnotmatch '^https://api\.github\.com/repos/penguiin1/focoach-downloads/releases/[1-9][0-9]*$') {
+        throw 'The source draft API URL must identify this repository and a numeric release ID.'
+    }
+    $raw = & gh api $apiUrl 2> (Join-Path $logs 'release-api.stderr')
     if ($LASTEXITCODE -ne 0) { throw 'The source draft cannot be read with this run token.' }
     $release = $raw | ConvertFrom-Json
     if ($release.tag_name -cne $Tag -or $release.draft -ne $true -or $null -ne $release.published_at) {
